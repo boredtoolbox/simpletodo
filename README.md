@@ -14,6 +14,13 @@ unzip it, and drag `SimpleTodo.app` into Applications. The app is unsigned, so
 the first time you open it, right-click it and choose **Open**. If macOS still
 blocks it, go to System Settings → Privacy & Security and click **Open Anyway**.
 
+If macOS says the app "is damaged and can't be opened", the file is fine.
+macOS has flagged it as downloaded from the internet. Clear that flag with:
+
+```bash
+xattr -dr com.apple.quarantine /Applications/SimpleTodo.app
+```
+
 ## Run from source (macOS and Ubuntu)
 
 You need Python 3.10 or newer.
