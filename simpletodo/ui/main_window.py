@@ -141,8 +141,8 @@ class MainWindow(QMainWindow):
         status.addPermanentWidget(self.db_path_label, 1)
 
         self.show_archive(False)
-        store.projectsChanged.connect(self._refresh_status)
-        store.tasksChanged.connect(self._refresh_status)
+        store.changed.connect(self._refresh_status)
+        store.taskCompleted.connect(self._refresh_status)
         store.errorOccurred.connect(self.show_error)
         self._refresh_status()
 

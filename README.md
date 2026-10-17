@@ -8,7 +8,7 @@ file on your own disk.
 
 ## Download (macOS, Apple Silicon)
 
-Download `SimpleTodo-1.0.0-macos-arm64.zip` from the
+Download `SimpleTodo-1.0.1-macos-arm64.zip` from the
 [latest release](https://github.com/boredtoolbox/simpletodo/releases/latest),
 unzip it, and drag `SimpleTodo.app` into Applications. The app is unsigned, so
 the first time you open it, right-click it and choose **Open**. If macOS still

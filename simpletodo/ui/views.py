@@ -1,7 +1,8 @@
 """The Projects tab and the Date tab.
 
 Both observe the store and rebuild themselves whenever it reports a change,
-remembering which sections the person had opened.
+remembering which sections the person had opened. Ticking a box is the
+exception: it updates the existing rows, since nothing appears or disappears.
 """
 
 from __future__ import annotations
@@ -46,6 +47,7 @@ class _CentredScrollView(QWidget):
         super().__init__(parent)
         self.setObjectName("tabPage")
         self.store = store
+        self.store.taskCompleted.connect(self._on_task_completed)
 
         self.column = QWidget()
         self.column.setObjectName("contentColumn")
@@ -140,6 +142,23 @@ class _CentredScrollView(QWidget):
         if holder.height() != wanted:
             holder.resize(viewport.width(), wanted)
 
+    def _on_task_completed(self, task_id: int, done: bool) -> None:
+        """Mark the task's rows done and recount their sections, in place.
+
+        A rebuild here destroyed the very checkbox being clicked and took
+        about a second on macOS before the tick could be drawn.
+        """
+        for section in self.column.findChildren(CollapsibleSection):
+            section_rows = section.body.findChildren(TaskRow)
+            matching = [r for r in section_rows if r.task.id == task_id]
+            if not matching:
+                continue
+            for row in matching:
+                row.set_completed(done)
+            section.set_counts(
+                sum(r.task.is_completed for r in section_rows), len(section_rows)
+            )
+
     def _clear_column(self) -> None:
         while self.column_layout.count():
             item = self.column_layout.takeAt(0)
@@ -224,11 +243,17 @@ class ProjectsView(_CentredScrollView):
         super().__init__(store, parent)
         self.archived = archived
         self._open_ids: set[int] = set()
-        self.store.projectsChanged.connect(self.refresh)
-        self.store.tasksChanged.connect(self.refresh)
+        self._stale = False
+        self.store.changed.connect(self.refresh)
         self.refresh()
 
     def refresh(self) -> None:
+        # The archive page is hidden almost all the time; rebuilding it on
+        # every change is wasted work. It catches up when it is next shown.
+        if self.archived and self.isHidden():
+            self._stale = True
+            return
+        self._stale = False
         self._clear_column()
         projects = self.store.projects(archived=self.archived)
 
@@ -268,6 +293,11 @@ class ProjectsView(_CentredScrollView):
                 section.set_expanded(True, animate=False)
 
         self._settle()
+
+    def showEvent(self, event):  # noqa: N802 - Qt naming
+        if self._stale:
+            self.refresh()
+        super().showEvent(event)
 
     def _remember(self, project_id: int, opened: bool) -> None:
         if opened:
@@ -336,8 +366,7 @@ class DateView(_CentredScrollView):
         super().__init__(store, parent)
         # Today is the section people want on arrival.
         self._open_buckets: set[Bucket] = {Bucket.TODAY}
-        self.store.tasksChanged.connect(self.refresh)
-        self.store.projectsChanged.connect(self.refresh)
+        self.store.changed.connect(self.refresh)
         self.refresh()
 
     def refresh(self) -> None:
@@ -376,6 +405,13 @@ class DateView(_CentredScrollView):
             )
 
         self._settle()
+
+    def _on_task_completed(self, task_id: int, done: bool) -> None:
+        if HIDE_COMPLETED_IN_DATE_VIEW:
+            # The row has to leave or arrive, which only a rebuild does.
+            self.refresh()
+        else:
+            super()._on_task_completed(task_id, done)
 
     def _remember(self, bucket: Bucket, opened: bool) -> None:
         if opened:

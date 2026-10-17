@@ -290,6 +290,93 @@ def test_toggling_in_one_tab_updates_the_other(win):
     assert any("(1/3)" in t for t in titles), titles
 
 
+def test_ticking_a_box_updates_rows_in_place_instead_of_rebuilding(win):
+    """A rebuild destroyed the clicked checkbox and lagged ~1s on macOS."""
+    seed(win)
+    sections(win.projects_view)[0].set_expanded(True, animate=False)
+    before = {id(r) for v in (win.projects_view, win.date_view) for r in rows(v)}
+    row = [r for r in rows(win.projects_view) if r.task.name == "Wash|Dishes"][0]
+
+    row.check.setChecked(True)
+    spin()
+
+    after = {id(r) for v in (win.projects_view, win.date_view) for r in rows(v)}
+    assert after == before
+    assert row in rows(win.projects_view) and row.check.isChecked()
+    assert win.store_errors == []
+
+
+def test_a_tick_reaches_every_copy_of_the_task_and_every_count(win):
+    seed(win)
+    row = [r for r in rows(win.projects_view) if r.task.name == "Wash|Dishes"][0]
+    row.check.setChecked(True)
+    spin()
+
+    # Due today, so it sits in both Today and This Week.
+    copies = [r for r in rows(win.date_view) if r.task.name == "Wash|Dishes"]
+    assert len(copies) == 2
+    assert all(r.check.isChecked() and r.name_label.property("done") for r in copies)
+    labels = [s.header_text for s in sections(win.date_view)]
+    assert any("Today" in l and "This" not in l and "(1/2)" in l for l in labels), labels
+    assert any("This Week" in l and "(1/" in l for l in labels), labels
+    assert "1 done" in win.counts_label.text()
+
+
+def test_unticking_works_in_place_too(win):
+    seed(win)
+    row = [r for r in rows(win.date_view) if r.task.name == "Wash|Dishes"][0]
+    row.check.setChecked(True)
+    spin()
+    row.check.setChecked(False)
+    spin()
+    stored = win.store.tasks_for_project(row.task.project_id)
+    assert not any(t.is_completed for t in stored)
+    assert not row.name_label.property("done")
+    assert any("(0/3)" in s.header_text for s in sections(win.projects_view))
+
+
+def test_completing_an_overdue_task_clears_its_overdue_note(win):
+    seed(win)
+    row = [r for r in rows(win.date_view) if r.task.name == "Call|Plumber"][0]
+    assert row.due_label.property("overdue") is True
+    row.check.setChecked(True)
+    spin()
+    assert row.due_label.property("overdue") is False
+    assert "overdue" not in row.due_label.text()
+
+
+def test_each_change_is_announced_once(win):
+    """Two signals per change meant every view rebuilt twice."""
+    seed(win)
+    changed, ticked = [], []
+    win.store.changed.connect(lambda: changed.append(1))
+    win.store.taskCompleted.connect(lambda *a: ticked.append(a))
+
+    project = win.store.projects()[0]
+    win.store.create_task("One|More", "2030-01-01", project.id)
+    assert len(changed) == 1
+
+    task = win.store.tasks_for_project(project.id)[0]
+    win.store.set_task_completed(task.id, True)
+    assert len(changed) == 1 and ticked == [(task.id, True)]
+
+
+def test_the_closed_archive_is_not_rebuilt_until_opened(win):
+    from PySide6.QtCore import QPoint
+
+    seed(win)
+    win.store.create_project("Spare|One")
+    menu = win.projects_view._project_menu(
+        [p for p in win.store.projects() if p.name == "Spare|One"][0], QPoint(0, 0)
+    )
+    _action(menu, "Archive project").trigger()
+    spin()
+    assert sections(win.archive_view) == []          # still closed, still stale
+
+    win.show_archive(True)
+    assert [s for s in sections(win.archive_view) if "Spare|One" in s.header_text]
+
+
 # -- chrome -------------------------------------------------------------
 
 
@@ -1126,6 +1213,7 @@ def test_archiving_moves_a_project_out_of_both_tabs(win):
 
     assert sections(win.projects_view) == []
     assert rows(win.date_view) == []
+    win.show_archive(True)
     archived = sections(win.archive_view)
     assert len(archived) == 1 and "Home|Chores" in archived[0].header_text
 
@@ -1133,6 +1221,7 @@ def test_archiving_moves_a_project_out_of_both_tabs(win):
 def test_archived_tasks_are_kept_and_visible_in_the_archive(win):
     seed(win)
     _archive_first_project(win)
+    win.show_archive(True)
     section = sections(win.archive_view)[0]
     section.set_expanded(True, animate=False)
     names = sorted(r.task.name for r in rows(win.archive_view))
@@ -1144,6 +1233,8 @@ def test_restoring_brings_a_project_back(win):
 
     seed(win)
     _archive_first_project(win)
+    win.show_archive(True)               # restoring happens from inside it
+    assert len(sections(win.archive_view)) == 1
     archived = win.store.projects(archived=True)[0]
     menu = win.archive_view._project_menu(archived, QPoint(0, 0))
     assert [a.text() for a in menu.actions()] == [
@@ -1190,6 +1281,7 @@ def test_the_archive_button_sits_under_the_plus(win):
 
 
 def test_an_empty_archive_says_how_to_fill_it(win):
+    win.show_archive(True)
     texts = [l.text() for l in win.archive_view.column.findChildren(QLabel)]
     assert any("Nothing archived" in t for t in texts), texts
 

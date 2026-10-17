@@ -20,10 +20,13 @@ from .models import Project, Task
 class TodoStore(QObject):
     """Single source of truth, and the only thing the views mutate."""
 
-    #: The project list or any project's task counts changed.
-    projectsChanged = Signal()
-    #: Any task was added, removed, or toggled.
-    tasksChanged = Signal()
+    #: Projects or tasks were added, removed, renamed or archived. Views
+    #: rebuild. One signal, not one per table: every view shows both, so two
+    #: signals meant every view rebuilt twice per change.
+    changed = Signal()
+    #: A task was ticked or unticked. Nothing appears or disappears, so views
+    #: update the rows in place -- rebuilding them all made the tick lag.
+    taskCompleted = Signal(int, bool)
     #: A storage problem the person should see.
     errorOccurred = Signal(str)
 
@@ -69,7 +72,7 @@ class TodoStore(QObject):
     def create_project(self, name: str) -> Project | None:
         project = self._guard(lambda: self._db.add_project(name), default=None)
         if project is not None:
-            self.projectsChanged.emit()
+            self.changed.emit()
         return project
 
     def create_task(
@@ -80,8 +83,7 @@ class TodoStore(QObject):
             default=None,
         )
         if task is not None:
-            self.tasksChanged.emit()
-            self.projectsChanged.emit()   # the project's (X/Y) moved
+            self.changed.emit()
         return task
 
     def rename_project(self, project_id: int, name: str) -> bool:
@@ -89,8 +91,7 @@ class TodoStore(QObject):
             lambda: (self._db.rename_project(project_id, name), True)[1], default=False
         )
         if ok:
-            self.projectsChanged.emit()
-            self.tasksChanged.emit()   # the Date tab prints project names
+            self.changed.emit()
         return bool(ok)
 
     def rename_task(self, task_id: int, name: str) -> bool:
@@ -98,7 +99,7 @@ class TodoStore(QObject):
             lambda: (self._db.rename_task(task_id, name), True)[1], default=False
         )
         if ok:
-            self.tasksChanged.emit()
+            self.changed.emit()
         return bool(ok)
 
     def set_task_completed(self, task_id: int, completed: bool) -> bool:
@@ -107,8 +108,7 @@ class TodoStore(QObject):
             default=False,
         )
         if ok:
-            self.tasksChanged.emit()
-            self.projectsChanged.emit()
+            self.taskCompleted.emit(task_id, completed)
         return bool(ok)
 
     def delete_task(self, task_id: int) -> bool:
@@ -116,8 +116,7 @@ class TodoStore(QObject):
             lambda: (self._db.delete_task(task_id), True)[1], default=False
         )
         if ok:
-            self.tasksChanged.emit()
-            self.projectsChanged.emit()
+            self.changed.emit()
         return bool(ok)
 
     def delete_project(self, project_id: int) -> bool:
@@ -125,8 +124,7 @@ class TodoStore(QObject):
             lambda: (self._db.delete_project(project_id), True)[1], default=False
         )
         if ok:
-            self.projectsChanged.emit()
-            self.tasksChanged.emit()
+            self.changed.emit()
         return bool(ok)
 
     def set_project_archived(self, project_id: int, archived: bool) -> bool:
@@ -135,9 +133,7 @@ class TodoStore(QObject):
             default=False,
         )
         if ok:
-            # The project's tasks leave (or rejoin) the Date tab too.
-            self.projectsChanged.emit()
-            self.tasksChanged.emit()
+            self.changed.emit()
         return bool(ok)
 
     # -- plumbing -------------------------------------------------------

@@ -528,6 +528,26 @@ class TaskRow(QFrame):
         if self.task.id is not None:
             self.toggled.emit(self.task.id, checked)
 
+    def set_completed(self, done: bool, *, today: date | None = None) -> None:
+        """Show the task as done or not, without rebuilding the row."""
+        self.task.is_completed = done
+        # Silent: this mirrors a change already stored, and re-emitting it
+        # would write it again.
+        blocked = self.check.blockSignals(True)
+        self.check.setChecked(done)
+        self.check.blockSignals(blocked)
+
+        # A finished task is never overdue, so the due note can change too.
+        today = today or date.today()
+        self.due_label.setText(self._due_text(self._show_project, today))
+        self.due_label.setProperty("overdue", self.task.is_overdue(today))
+        self.due_label.setVisible(bool(self.due_label.text()))
+
+        self.check.setProperty("done", done)
+        self.name_label.setProperty("done", done)
+        for widget in (self.check, self.name_label, self.due_label):
+            restyle(widget)
+
     # -- menu -----------------------------------------------------------
 
     def _reveal_menu(self, revealed: bool) -> None:
