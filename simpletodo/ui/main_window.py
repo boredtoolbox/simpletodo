@@ -1,32 +1,35 @@
-"""The application window: two tabs, a + button, and a quiet status bar."""
+"""The application window: a Notes-style browser and a quiet status bar."""
 
 from __future__ import annotations
 
+import warnings
 from pathlib import Path
 
-from PySide6.QtCore import QPoint, QSize, Qt
-from PySide6.QtGui import QAction, QKeySequence, QShortcut
+from PySide6.QtCore import QPoint, Qt
+from PySide6.QtGui import QAction, QGuiApplication, QKeySequence, QShortcut
 from PySide6.QtWidgets import (
+    QButtonGroup,
     QHBoxLayout,
     QLabel,
     QMainWindow,
-    QMessageBox,
     QPushButton,
     QStatusBar,
-    QTabWidget,
     QVBoxLayout,
     QWidget,
 )
 
 from ..store import TodoStore
-from .dialogs import CreateProjectDialog, CreateTaskDialog
-from .style import SPACE_1, SPACE_2, SPACE_3, archive_icon_svg
-from .widgets import ElidedLabel, restyle, rounded_menu, svg_icon
-from .views import DateView, ProjectsView
+from . import macos
+from .dialogs import CreateProjectDialog, CreateTaskDialog, MessageDialog, confirm
+from .style import SIDEBAR_GUTTER, SPACE_1, SPACE_2, SPACE_3, TOOL_SIZE
+from .views import Browser, Mode
+from .widgets import ElidedLabel, TopBar, rounded_menu
 
 APP_TITLE = "Simple To Do"
-ADD_BUTTON_SIZE = 34
-ARCHIVE_ICON_SIZE = 18
+ADD_BUTTON_SIZE = TOOL_SIZE
+#: The top bar's height where the window keeps a native title bar (Linux).
+#: On macOS it is the title bar's own height, read once the window is shown.
+TOP_BAR_HEIGHT = 40
 MIN_WIDTH = 600
 MIN_HEIGHT = 440
 
@@ -38,19 +41,27 @@ class MainWindow(QMainWindow):
 
         self.setWindowTitle("SimpleTodo")
         self.setMinimumSize(MIN_WIDTH, MIN_HEIGHT)
-        self.resize(680, 560)
+        self.resize(860, 580)
 
-        self.tabs = QTabWidget()
-        self.tabs.setDocumentMode(True)
-        self.tabs.tabBar().setExpanding(False)
-        self.tabs.tabBar().setDrawBase(False)
+        # As in Notes, the content runs up under a see-through title bar, so
+        # the traffic lights sit inside the sidebar and the toolbar shares
+        # their row. Elsewhere the native title bar stays.
+        self._under_title_bar = QGuiApplication.platformName() == "cocoa"
+        if self._under_title_bar:
+            with warnings.catch_warnings():
+                # PySide flags the value as deprecated because an old,
+                # deprecated flag shares it; the new name is the right one.
+                warnings.simplefilter("ignore", DeprecationWarning)
+                self.setWindowFlag(Qt.ExpandedClientAreaHint, True)
+                self.setWindowFlag(Qt.NoTitleBarBackgroundHint, True)
+            # Qt otherwise insets the contents by the title bar's height,
+            # undoing the point of running under it.
+            self.setAttribute(Qt.WA_ContentsMarginsRespectsSafeArea, False)
 
-        self.projects_view = ProjectsView(store)
-        self.date_view = DateView(store)
-        self.tabs.addTab(self.projects_view, "Projects")
-        self.tabs.addTab(self.date_view, "Date")
-        # Centre the two tab labels over the content column.
-        self.tabs.tabBar().setStyleSheet("QTabBar { alignment: center; }")
+        # -- the sidebar header: masthead, +, and the view switch --------
+
+        self.title_label = QLabel(APP_TITLE)
+        self.title_label.setObjectName("appTitle")
 
         self.add_button = QPushButton("+")
         self.add_button.setObjectName("addButton")
@@ -59,68 +70,61 @@ class MainWindow(QMainWindow):
         self.add_button.setToolTip("Create a project or a task")
         self.add_button.clicked.connect(self._show_add_menu)
 
-        # Sits under the +, a toggle between the tabs and the archive.
-        self.archive_button = QPushButton()
-        self.archive_button.setObjectName("archiveButton")
-        self.archive_button.setCheckable(True)
-        self.archive_button.setFixedSize(ADD_BUTTON_SIZE, ADD_BUTTON_SIZE)
-        self.archive_button.setIcon(svg_icon(archive_icon_svg(), ARCHIVE_ICON_SIZE))
-        self.archive_button.setIconSize(QSize(ARCHIVE_ICON_SIZE, ARCHIVE_ICON_SIZE))
-        self.archive_button.setCursor(Qt.PointingHandCursor)
-        self.archive_button.toggled.connect(self.show_archive)
+        # The sidebar's share of the top bar: the traffic lights on the left
+        # (on macOS), the + on the right, the window draggable in between.
+        self.sidebar_bar = TopBar()
+        bar = QHBoxLayout(self.sidebar_bar)
+        bar.setContentsMargins(0, 0, SIDEBAR_GUTTER + SPACE_1, 0)
+        bar.addStretch(1)
+        bar.addWidget(self.add_button)
 
-        self.archive_view = ProjectsView(store, archived=True)
-        self.archive_view.setVisible(False)
-        self.archive_heading = QLabel("Archive")
-        self.archive_heading.setObjectName("archiveHeading")
-        self.archive_heading.setVisible(False)
-        self.tabs.tabBar().tabBarClicked.connect(self._on_tab_clicked)
+        # Archive sits in the switch beside Projects and Date, so the way back
+        # out of it is always on screen. A lone toggle button was not: people
+        # could not find their way back from the archive.
+        segment_bar = QWidget()
+        segment_bar.setObjectName("segmentBar")
+        segment_bar.setAttribute(Qt.WA_StyledBackground, True)
+        segments = QHBoxLayout(segment_bar)
+        segments.setContentsMargins(2, 2, 2, 2)
+        segments.setSpacing(2)
+        self.segment_group = QButtonGroup(self)
+        self.segments: dict[Mode, QPushButton] = {}
+        for mode in Mode:
+            button = QPushButton(mode.value)
+            button.setObjectName("segment")
+            button.setCheckable(True)
+            button.setCursor(Qt.PointingHandCursor)
+            button.setFocusPolicy(Qt.NoFocus)
+            button.clicked.connect(lambda _=False, m=mode: self.show_mode(m))
+            self.segment_group.addButton(button)
+            self.segments[mode] = button
+            segments.addWidget(button, 1)
+
+        header = QWidget()
+        header.setObjectName("sidebarHeader")
+        header_layout = QVBoxLayout(header)
+        header_layout.setContentsMargins(0, 0, 0, SPACE_3)
+        header_layout.setSpacing(0)
+        header_layout.addWidget(self.sidebar_bar)
+        # Text in the header lines up with the text of the items below.
+        inset = SIDEBAR_GUTTER + SPACE_2
+        below = QVBoxLayout()
+        below.setContentsMargins(inset, SPACE_2, inset, 0)
+        below.setSpacing(SPACE_3)
+        below.addWidget(self.title_label)
+        below.addWidget(segment_bar)
+        header_layout.addLayout(below)
+
+        self.browser = Browser(store, header)
+        self.browser.newTaskRequested.connect(self.create_task)
+        self.setCentralWidget(self.browser)
+        self._set_top_bar_height(TOP_BAR_HEIGHT)
+
         leave = QShortcut(QKeySequence(Qt.Key_Escape), self)
         leave.activated.connect(lambda: self.show_archive(False))
+        self._last_live_mode = Mode.PROJECTS
 
-        # The + sits top left; an equally wide spacer on the right keeps the
-        # tab labels centred in the window rather than centred in what is left.
-        spacer = QWidget()
-        spacer.setFixedWidth(ADD_BUTTON_SIZE)
-
-        # The masthead lives outside the tab widget, so it stays put whichever
-        # tab is open.
-        self.title_label = QLabel(APP_TITLE)
-        self.title_label.setObjectName("appTitle")
-        self.title_label.setAlignment(Qt.AlignCenter)
-
-        title_row = QHBoxLayout()
-        title_row.setContentsMargins(SPACE_3, SPACE_2, SPACE_3, 0)
-        title_row.setSpacing(0)
-        title_row.addWidget(self.add_button, 0, Qt.AlignLeft | Qt.AlignVCenter)
-        title_row.addStretch(1)
-        title_row.addWidget(self.title_label, 0, Qt.AlignHCenter)
-        title_row.addStretch(1)
-        title_row.addWidget(spacer)
-
-        tab_spacer = QWidget()
-        tab_spacer.setFixedWidth(ADD_BUTTON_SIZE)
-
-        tab_row = QHBoxLayout()
-        tab_row.setContentsMargins(SPACE_3, SPACE_1, SPACE_3, 0)
-        tab_row.setSpacing(0)
-        tab_row.addWidget(self.archive_button, 0, Qt.AlignLeft | Qt.AlignVCenter)
-        tab_row.addStretch(1)
-        tab_row.addWidget(self.tabs.tabBar(), 0, Qt.AlignHCenter)
-        tab_row.addWidget(self.archive_heading, 0, Qt.AlignHCenter)
-        tab_row.addStretch(1)
-        tab_row.addWidget(tab_spacer)
-
-        central = QWidget()
-        central.setObjectName("appBackdrop")
-        layout = QVBoxLayout(central)
-        layout.setContentsMargins(0, SPACE_3, 0, 0)
-        layout.setSpacing(0)
-        layout.addLayout(title_row)
-        layout.addLayout(tab_row)
-        layout.addWidget(self.tabs, 1)
-        layout.addWidget(self.archive_view, 1)
-        self.setCentralWidget(central)
+        # -- status bar ---------------------------------------------------
 
         status = QStatusBar()
         status.setSizeGripEnabled(False)
@@ -140,83 +144,79 @@ class MainWindow(QMainWindow):
         self.db_path_label.setToolTip(str(db_path))
         status.addPermanentWidget(self.db_path_label, 1)
 
-        self.show_archive(False)
+        self.show_mode(Mode.PROJECTS)
         store.changed.connect(self._refresh_status)
         store.taskCompleted.connect(self._refresh_status)
         store.errorOccurred.connect(self.show_error)
         self._refresh_status()
 
-    # -- the + menu -----------------------------------------------------
+    # -- views ------------------------------------------------------------
+
+    @property
+    def mode(self) -> Mode:
+        return self.browser.mode
+
+    def show_mode(self, mode: Mode) -> None:
+        if mode is not Mode.ARCHIVE:
+            self._last_live_mode = mode
+        self.segments[mode].setChecked(True)
+        self.browser.set_mode(mode)
+
+    def show_archive(self, shown: bool) -> None:
+        """Open the archive, or go back to the view it was opened from."""
+        self.show_mode(Mode.ARCHIVE if shown else self._last_live_mode)
+
+    # -- the + menu -------------------------------------------------------
 
     def _show_add_menu(self) -> None:
         menu = rounded_menu(self)
         new_project = QAction("Create Project", self)
         new_project.triggered.connect(self.create_project)
         new_task = QAction("Create Task", self)
-        new_task.triggered.connect(self.create_task)
+        new_task.triggered.connect(lambda: self.create_task())
         menu.addAction(new_project)
         menu.addAction(new_task)
 
-        # Hangs below the button, which now sits at the top of the window.
         anchor = self.add_button.mapToGlobal(QPoint(0, self.add_button.height()))
         menu.popup(anchor + QPoint(0, SPACE_1))
 
-    def show_archive(self, shown: bool) -> None:
-        """Swap the tab pages for the archive, or back.
-
-        The tab labels stay on screen with Archive beside them, so the way
-        back is the obvious one: click Projects or Date. Hiding them left only
-        the highlighted box button, which nobody read as "back".
-        """
-        self.archive_button.setChecked(shown)
-        self.tabs.setVisible(not shown)
-        self.archive_view.setVisible(shown)
-        self.archive_heading.setVisible(shown)
-        tab_bar = self.tabs.tabBar()
-        tab_bar.setProperty("archiveOpen", shown)
-        restyle(tab_bar)
-        self.archive_button.setToolTip(
-            "Back to your projects" if shown else "Show archived projects"
-        )
-
-    def _on_tab_clicked(self, index: int) -> None:
-        # tabBarClicked fires for the current tab too, which is the one most
-        # likely to be clicked to leave the archive.
-        if index >= 0:
-            self.show_archive(False)
-            # Set explicitly: a click on the other tab while the archive was
-            # open left the archive but stayed on the old tab without this.
-            # test_clicking_the_other_tab_leaves_the_archive_for_that_tab.
-            self.tabs.setCurrentIndex(index)
-
     def create_project(self) -> None:
         dialog = CreateProjectDialog(self.store, self)
-        if dialog.exec():
-            # New work is live work: show it where it landed.
-            self.show_archive(False)
-            self.tabs.setCurrentWidget(self.projects_view)
+        # New work is live work: show it where it landed.
+        dialog.created.connect(lambda project: self._reveal_project(project.id))
+        dialog.exec()
 
-    def create_task(self) -> None:
+    def create_task(self, project_id: int | None = None) -> None:
+        """Ask for a new task, filed under *project_id* unless changed."""
         if not self.store.projects():
-            answer = QMessageBox.question(
+            if confirm(
                 self,
-                "No projects yet",
-                "A task has to belong to a project, and there are none yet.\n\n"
+                "No Projects Yet",
+                "A task has to belong to a project, and there are none yet. "
                 "Create a project now?",
-                QMessageBox.Yes | QMessageBox.No,
-                QMessageBox.Yes,
-            )
-            if answer == QMessageBox.Yes:
+                confirm_text="New Project",
+            ):
                 self.create_project()
                 if self.store.projects():
                     self.create_task()
             return
 
-        dialog = CreateTaskDialog(self.store, self)
-        if dialog.exec():
-            self.show_archive(False)
+        dialog = CreateTaskDialog(self.store, self, preselect_project_id=project_id)
+        dialog.created.connect(self._reveal_task)
+        dialog.exec()
 
-    # -- chrome ---------------------------------------------------------
+    def _reveal_task(self, task) -> None:
+        # In the Date view the task already shows under its bucket; anywhere
+        # else, open its project so it is seen.
+        if self.mode is not Mode.DATE:
+            self._reveal_project(task.project_id)
+
+    def _reveal_project(self, project_id: int) -> None:
+        self._last_live_mode = Mode.PROJECTS
+        self.segments[Mode.PROJECTS].setChecked(True)
+        self.browser.reveal_project(project_id)
+
+    # -- chrome -----------------------------------------------------------
 
     def _refresh_status(self) -> None:
         projects, tasks, done = self.store.counts()
@@ -232,18 +232,26 @@ class MainWindow(QMainWindow):
         self.counts_label.setText(text)
 
     def show_error(self, message: str) -> None:
-        box = QMessageBox(self)
-        box.setIcon(QMessageBox.Warning)
-        box.setWindowTitle("Storage problem")
-        box.setText(message)
-        box.exec()
+        MessageDialog("Storage Problem", message, self, cancel_text=None).exec()
 
     def notify(self, title: str, message: str) -> None:
-        box = QMessageBox(self)
-        box.setIcon(QMessageBox.Information)
-        box.setWindowTitle(title)
-        box.setText(message)
-        box.exec()
+        MessageDialog(title, message, self, cancel_text=None).exec()
+
+    # -- the top bar -------------------------------------------------------
+
+    def showEvent(self, event):  # noqa: N802 - Qt naming
+        super().showEvent(event)
+        if self._under_title_bar:
+            macos.hide_title_text(self)
+            # The traffic lights are centred in the title bar, so a top bar
+            # exactly as tall puts the + and the toolbar on their line.
+            title_bar = self.windowHandle().safeAreaMargins().top()
+            if title_bar > 0:
+                self._set_top_bar_height(title_bar)
+
+    def _set_top_bar_height(self, height: int) -> None:
+        self.sidebar_bar.setFixedHeight(height)
+        self.browser.top_bar.setFixedHeight(height)
 
 
 def _display_path(path: Path) -> str:

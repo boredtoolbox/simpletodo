@@ -1,15 +1,17 @@
-"""The Create Project and Create Task modals."""
+"""The dialogs: create, rename, and the confirm/notice sheet."""
 
 from __future__ import annotations
 
 from datetime import date
 
 from PySide6.QtCore import QDate, Qt, Signal
-from PySide6.QtGui import QValidator
+from PySide6.QtGui import QGuiApplication, QValidator
 from PySide6.QtWidgets import (
     QComboBox,
     QDateEdit,
     QDialog,
+    QFrame,
+    QGridLayout,
     QHBoxLayout,
     QLabel,
     QLineEdit,
@@ -48,19 +50,24 @@ class NameValidator(QValidator):
 
 
 def _field_label(text: str) -> QLabel:
-    # Sentence case: an all-caps label shouts without adding information.
-    label = QLabel(text)
+    # Sentence case with a colon, as a Mac sheet labels its fields.
+    label = QLabel(f"{text}:")
     label.setObjectName("fieldLabel")
     return label
 
 
 class _BaseDialog(QDialog):
-    """Shared chrome: a centred title, a message line, and two buttons."""
+    """Shared chrome, laid out like a Notes sheet.
+
+    A bold title at the top left; fields in a grid with their labels to the
+    left; a hairline; Cancel and the commit button at the bottom right. On
+    macOS it opens as a sheet sliding out of the window's title bar.
+    """
 
     def __init__(
         self,
         title: str,
-        store: TodoStore,
+        store: TodoStore | None = None,
         parent: QWidget | None = None,
         *,
         commit_text: str = "Create",
@@ -69,46 +76,68 @@ class _BaseDialog(QDialog):
         self.store = store
         self.setModal(True)
         self.setWindowTitle(title)
+        if parent is not None and QGuiApplication.platformName() == "cocoa":
+            self.setWindowFlag(Qt.Sheet, True)
+            self.setWindowModality(Qt.WindowModal)
 
         self._title = QLabel(title)
         self._title.setObjectName("dialogTitle")
-        self._title.setAlignment(Qt.AlignCenter)
 
         self.message = QLabel("")
         self.message.setObjectName("errorNote")
-        self.message.setAlignment(Qt.AlignCenter)
         self.message.setWordWrap(True)
+        self.message.setVisible(False)
 
         self.create_button = QPushButton(commit_text)
         self.create_button.setObjectName("primary")
-        self.create_button.setCursor(Qt.PointingHandCursor)
         self.create_button.setDefault(True)
         self.create_button.clicked.connect(self._on_create)
 
         self.cancel_button = QPushButton("Cancel")
         self.cancel_button.setObjectName("ghost")
-        self.cancel_button.setCursor(Qt.PointingHandCursor)
         self.cancel_button.clicked.connect(self.reject)
 
         buttons = QHBoxLayout()
-        buttons.setSpacing(SPACE_2)
+        buttons.setSpacing(SPACE_3)
         buttons.addStretch(1)
         buttons.addWidget(self.cancel_button)
         buttons.addWidget(self.create_button)
 
-        self.form = QVBoxLayout()
-        self.form.setSpacing(SPACE_1)
+        self.fields = QGridLayout()
+        self.fields.setHorizontalSpacing(SPACE_3)
+        self.fields.setVerticalSpacing(SPACE_2)
+        self.fields.setColumnStretch(1, 1)
+
+        divider = QFrame()
+        divider.setObjectName("dialogDivider")
+        divider.setFixedHeight(1)
 
         outer = QVBoxLayout(self)
-        outer.setContentsMargins(SPACE_6, SPACE_6, SPACE_6, SPACE_6)
+        outer.setContentsMargins(SPACE_6, SPACE_6 - SPACE_1, SPACE_6, SPACE_4 + SPACE_1)
         outer.setSpacing(SPACE_4)
         outer.addWidget(self._title)
-        outer.addLayout(self.form)
+        outer.addLayout(self.fields)
         outer.addWidget(self.message)
+        outer.addWidget(divider)
         outer.addLayout(buttons)
+
+    def add_field(self, label: str, field: QWidget, hint: QWidget | None = None) -> None:
+        """A labelled row, with an optional hint under the field."""
+        row = self.fields.rowCount()
+        name = _field_label(label)
+        # A multi-line field reads from its first line, so its label does too.
+        tall = isinstance(field, QTextEdit)
+        name.setAlignment(Qt.AlignRight | (Qt.AlignTop if tall else Qt.AlignVCenter))
+        if tall:
+            name.setContentsMargins(0, SPACE_1 + 2, 0, 0)
+        self.fields.addWidget(name, row, 0)
+        self.fields.addWidget(field, row, 1)
+        if hint is not None:
+            self.fields.addWidget(hint, row + 1, 1)
 
     def _set_error(self, text: str) -> None:
         self.message.setText(text)
+        self.message.setVisible(bool(text))
 
     def _on_create(self) -> None:  # pragma: no cover - overridden
         raise NotImplementedError
@@ -120,8 +149,8 @@ class CreateProjectDialog(_BaseDialog):
     created = Signal(object)
 
     def __init__(self, store: TodoStore, parent: QWidget | None = None) -> None:
-        super().__init__("Create Project", store, parent)
-        self.setMinimumWidth(380)
+        super().__init__("New Project", store, parent)
+        self.setMinimumWidth(440)
 
         self.name_edit = QLineEdit()
         self.name_edit.setValidator(NameValidator(self))
@@ -133,9 +162,7 @@ class CreateProjectDialog(_BaseDialog):
         self.hint = QLabel(NAME_HINT)
         self.hint.setObjectName("hint")
 
-        self.form.addWidget(_field_label("Project name"))
-        self.form.addWidget(self.name_edit)
-        self.form.addWidget(self.hint)
+        self.add_field("Name", self.name_edit, self.hint)
 
         self._on_name_changed(self.name_edit.text())
 
@@ -181,7 +208,7 @@ class RenameDialog(_BaseDialog):
         parent: QWidget | None = None,
     ) -> None:
         super().__init__(title, store, parent, commit_text="Rename")
-        self.setMinimumWidth(380)
+        self.setMinimumWidth(440)
         self._current = current_name
         self._taken = taken
         self.new_name: str | None = None
@@ -196,9 +223,7 @@ class RenameDialog(_BaseDialog):
         self.hint = QLabel(NAME_HINT)
         self.hint.setObjectName("hint")
 
-        self.form.addWidget(_field_label(field_label))
-        self.form.addWidget(self.name_edit)
-        self.form.addWidget(self.hint)
+        self.add_field(field_label, self.name_edit, self.hint)
 
         self._on_name_changed(self.name_edit.text())
 
@@ -236,8 +261,8 @@ class CreateTaskDialog(_BaseDialog):
         *,
         preselect_project_id: int | None = None,
     ) -> None:
-        super().__init__("Create Task", store, parent)
-        self.setMinimumWidth(420)
+        super().__init__("New Task", store, parent)
+        self.setMinimumWidth(480)
 
         # -- name
         self.name_edit = QLineEdit()
@@ -269,19 +294,10 @@ class CreateTaskDialog(_BaseDialog):
         self.project_combo = QComboBox()
         self._load_projects(preselect_project_id)
 
-        self.form.addWidget(_field_label("Task name"))
-        self.form.addWidget(self.name_edit)
-        self.form.addWidget(self.name_hint)
-        self.form.addSpacing(SPACE_3)
-        self.form.addWidget(_field_label("Description"))
-        self.form.addWidget(self.description_edit)
-        self.form.addWidget(self.description_hint)
-        self.form.addSpacing(SPACE_3)
-        self.form.addWidget(_field_label("Complete by"))
-        self.form.addWidget(self.date_edit)
-        self.form.addSpacing(SPACE_3)
-        self.form.addWidget(_field_label("Attach to project"))
-        self.form.addWidget(self.project_combo)
+        self.add_field("Name", self.name_edit, self.name_hint)
+        self.add_field("Description", self.description_edit, self.description_hint)
+        self.add_field("Due", self.date_edit)
+        self.add_field("Project", self.project_combo)
 
         self._revalidate()
 
@@ -293,10 +309,15 @@ class CreateTaskDialog(_BaseDialog):
         if not projects:
             self.project_combo.addItem("No projects yet — create one first", None)
             self.project_combo.setEnabled(False)
-        elif preselect_project_id is not None:
-            index = self.project_combo.findData(preselect_project_id)
+            return
+        # The project used for the last task wins over the one in view: the
+        # person asked to keep adding to the same project without re-picking
+        # it. An archived or deleted one is not in the list, so it is skipped.
+        for candidate in (self.store.last_task_project_id(), preselect_project_id):
+            index = self.project_combo.findData(candidate) if candidate else -1
             if index >= 0:
                 self.project_combo.setCurrentIndex(index)
+                return
 
     # -- live validation ------------------------------------------------
 
@@ -352,3 +373,55 @@ class CreateTaskDialog(_BaseDialog):
             return
         self.created.emit(task)
         self.accept()
+
+
+class MessageDialog(_BaseDialog):
+    """A question or a notice, in the same sheet as every other dialog.
+
+    Replaces QMessageBox, whose icon and native buttons broke the look. With
+    *cancel_text* None it is a plain notice with a single button.
+    """
+
+    def __init__(
+        self,
+        title: str,
+        message: str,
+        parent: QWidget | None = None,
+        *,
+        confirm_text: str = "OK",
+        cancel_text: str | None = "Cancel",
+        destructive: bool = False,
+    ) -> None:
+        super().__init__(title, None, parent, commit_text=confirm_text)
+        self.setMinimumWidth(400)
+        self.text_label = QLabel(message)
+        self.text_label.setObjectName("dialogMessage")
+        self.text_label.setWordWrap(True)
+        self.fields.addWidget(self.text_label, 0, 0, 1, 2)
+
+        if cancel_text is None:
+            self.cancel_button.setVisible(False)
+        else:
+            self.cancel_button.setText(cancel_text)
+        if destructive:
+            # Return should never delete: the safe choice is the default.
+            self.create_button.setDefault(False)
+            self.cancel_button.setDefault(True)
+
+    def _on_create(self) -> None:
+        self.accept()
+
+
+def confirm(
+    parent: QWidget | None,
+    title: str,
+    message: str,
+    *,
+    confirm_text: str,
+    destructive: bool = False,
+) -> bool:
+    """Ask a yes/no question; True when the person confirmed."""
+    dialog = MessageDialog(
+        title, message, parent, confirm_text=confirm_text, destructive=destructive
+    )
+    return bool(dialog.exec())

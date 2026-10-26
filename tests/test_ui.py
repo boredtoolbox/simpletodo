@@ -1,8 +1,8 @@
 """Tests that drive the real widgets."""
 
 import pytest
-from PySide6.QtCore import QDate, QEventLoop, QTimer
-from PySide6.QtWidgets import QApplication, QLabel, QMenu
+from PySide6.QtCore import QDate, QEventLoop, QPoint, Qt, QTimer
+from PySide6.QtWidgets import QApplication, QMenu
 
 from simpletodo.database import Database
 from simpletodo.dates import Bucket
@@ -10,7 +10,8 @@ from simpletodo.store import TodoStore
 from simpletodo.ui.dialogs import CreateProjectDialog, CreateTaskDialog
 from simpletodo.ui.main_window import MainWindow
 from simpletodo.ui.style import stylesheet
-from simpletodo.ui.widgets import CollapsibleSection, TaskRow
+from simpletodo.ui.views import Mode
+from simpletodo.ui.widgets import TaskRow
 
 
 @pytest.fixture(scope="session")
@@ -29,7 +30,7 @@ def win(app, tmp_path):
     errors: list[str] = []
     store.errorOccurred.connect(errors.append)
     window = MainWindow(store)
-    window.resize(700, 580)
+    window.resize(860, 580)
     window.show()
     window.store_errors = errors          # surfaced for assertions
     yield window
@@ -50,12 +51,29 @@ def spin(ms: int = 50) -> None:
     loop.exec()
 
 
-def sections(view) -> list[CollapsibleSection]:
-    return view.column.findChildren(CollapsibleSection)
+def items(win):
+    return win.browser.sidebar.items
 
 
-def rows(view) -> list[TaskRow]:
-    return view.column.findChildren(TaskRow)
+def item(win, title):
+    return next(i for i in items(win) if i.title == title)
+
+
+def details(win) -> dict[str, str]:
+    """Each sidebar item's second line, by title."""
+    return {i.title: i.detail_text for i in items(win)}
+
+
+def rows(win) -> list[TaskRow]:
+    return win.browser.pane.rows
+
+
+def row(win, name) -> TaskRow:
+    return next(r for r in rows(win) if r.task.name == name)
+
+
+def choose(win, title):
+    win.browser.select(item(win, title).key)
 
 
 def seed(win, *, offsets=((0, "Wash|Dishes"), (-3, "Call|Plumber"), (1, "Buy|Bread"))):
@@ -70,15 +88,14 @@ def seed(win, *, offsets=((0, "Wash|Dishes"), (-3, "Call|Plumber"), (1, "Buy|Bre
 
 
 def test_empty_state_invites_a_first_project(win):
-    texts = [l.text() for l in win.projects_view.column.findChildren(QLabel)]
-    assert any("No projects yet" in t for t in texts), texts
+    assert items(win) == []
+    assert "No projects yet" in win.browser.pane.message.text()
+    assert win.browser.pane.message.isVisible()
 
 
-def test_window_has_two_tabs_and_a_minimum_size(win):
-    assert [win.tabs.tabText(i) for i in range(win.tabs.count())] == [
-        "Projects",
-        "Date",
-    ]
+def test_window_offers_the_views_and_a_minimum_size(win):
+    assert [b.text() for b in win.segments.values()] == ["Projects", "Date", "Archive"]
+    assert win.segments[Mode.PROJECTS].isChecked()
     assert win.minimumWidth() >= 600
     assert win.minimumHeight() >= 400
 
@@ -195,154 +212,227 @@ def test_task_dialog_without_projects_cannot_create(win):
     assert not dialog.create_button.isEnabled()
 
 
-# -- projects tab -------------------------------------------------------
+# -- projects view ------------------------------------------------------
 
 
-def test_projects_tab_shows_name_and_counts(win):
+def test_sidebar_lists_projects_with_counts_and_the_next_task(win):
     seed(win)
     win.store.create_project("Empty|One")
-    titles = [s.header_text for s in sections(win.projects_view)]
-    assert any("Home|Chores" in t and "(0/3)" in t for t in titles), titles
+    shown = details(win)
+    # Tasks run by due date, so the overdue one is next.
+    assert shown["Home|Chores"] == "0/3  Call|Plumber"
     # A project with no tasks is still listed.
-    assert any("Empty|One" in t and "(0/0)" in t for t in titles), titles
+    assert shown["Empty|One"] == "0/0  No tasks"
 
 
-def test_ticking_a_box_updates_the_database_and_the_header(win):
+def test_the_first_project_is_selected_and_shown(win):
     seed(win)
-    section = sections(win.projects_view)[0]
-    section.set_expanded(True, animate=False)
-    row = [r for r in rows(win.projects_view) if r.task.name == "Buy|Bread"][0]
+    assert item(win, "Home|Chores").selected
+    assert win.browser.pane.title_label.text() == "Home|Chores"
+    assert sorted(r.task.name for r in rows(win)) == [
+        "Buy|Bread", "Call|Plumber", "Wash|Dishes",
+    ]
 
-    row.check.setChecked(True)
+
+def test_selecting_a_project_shows_its_tasks(win):
+    seed(win)
+    other = win.store.create_project("Garden")
+    win.store.create_task("Mow", "2030-01-01", other.id)
+    item(win, "Garden").mousePressEvent(_press())
+    assert item(win, "Garden").selected and not item(win, "Home|Chores").selected
+    assert [r.task.name for r in rows(win)] == ["Mow"]
+    assert win.browser.pane.title_label.text() == "Garden"
+
+
+def test_an_empty_project_says_so_in_the_pane(win):
+    win.store.create_project("Empty|One")
+    assert rows(win) == []
+    assert win.browser.pane.title_label.text() == "Empty|One"
+    texts = [w.text() for w in win.browser.pane.column.findChildren(type(win.title_label))]
+    assert "No tasks yet." in texts
+
+
+def test_ticking_a_box_updates_the_database_and_the_sidebar(win):
+    seed(win)
+    row(win, "Buy|Bread").check.setChecked(True)
     spin()
 
-    stored = [t for t in win.store.tasks_for_project(row.task.project_id)
+    stored = [t for t in win.store.tasks_for_project(row(win, "Buy|Bread").task.project_id)
               if t.name == "Buy|Bread"][0]
     assert stored.is_completed
-    assert any("(1/3)" in s.header_text for s in sections(win.projects_view))
+    assert details(win)["Home|Chores"].startswith("1/3")
+    assert win.browser.pane.subtitle_label.text() == "1 of 3 done"
 
 
 def test_a_completed_row_is_greyed(win):
     seed(win)
-    sections(win.projects_view)[0].set_expanded(True, animate=False)
-    row = [r for r in rows(win.projects_view) if r.task.name == "Buy|Bread"][0]
-    row.check.setChecked(True)
+    row(win, "Buy|Bread").check.setChecked(True)
     spin()
-    again = [r for r in rows(win.projects_view) if r.task.name == "Buy|Bread"][0]
-    assert again.check.property("done") is True
+    done = row(win, "Buy|Bread")
+    assert done.check.property("done") is True
+    assert done.name_label.property("done") is True
 
 
-def test_an_open_section_stays_open_across_a_refresh(win):
-    seed(win)
-    sections(win.projects_view)[0].set_expanded(True, animate=False)
-    win.store.create_project("Another|One")       # forces a rebuild
+def test_the_preview_skips_finished_tasks(win):
+    project = win.store.create_project("Solo")
+    task = win.store.create_task("Only|One", "2030-01-01", project.id)
+    win.store.set_task_completed(task.id, True)
     spin()
-    home = [s for s in sections(win.projects_view) if "Home|Chores" in s.header_text][0]
-    assert home.expanded
+    assert details(win)["Solo"] == "1/1  All done"
 
 
-def test_arrow_indicator_follows_the_state(win):
+def test_the_selection_survives_a_refresh(win):
     seed(win)
-    section = sections(win.projects_view)[0]
-    assert "▶" in section.header_text
-    section.set_expanded(True, animate=False)
-    assert "▼" in section.header_text
+    win.store.create_project("Another|One")
+    choose(win, "Home|Chores")
+    win.store.create_project("Third|One")          # forces a rebuild
+    spin()
+    assert item(win, "Home|Chores").selected
+    assert win.browser.pane.title_label.text() == "Home|Chores"
 
 
-# -- date tab -----------------------------------------------------------
+def test_deleting_the_selected_project_selects_another(win, monkeypatch):
+    from simpletodo.ui import views
+
+    seed(win)
+    win.store.create_project("Zebra")
+    choose(win, "Home|Chores")
+    monkeypatch.setattr(views, "confirm", _confirm(True))
+    win.browser._delete_project(win.store.projects()[0])
+    spin()
+    assert [i.title for i in items(win)] == ["Zebra"]
+    assert item(win, "Zebra").selected
 
 
-def test_date_tab_has_the_four_sections_with_counts(win):
+def test_arrow_keys_move_the_selection(win):
+    from PySide6.QtTest import QTest
+
+    for name in ("Alpha", "Beta", "Gamma"):
+        win.store.create_project(name)
+    sidebar = win.browser.sidebar
+    choose(win, "Alpha")
+
+    QTest.keyClick(sidebar, Qt.Key_Down)
+    assert item(win, "Beta").selected
+    QTest.keyClick(sidebar, Qt.Key_Down)
+    QTest.keyClick(sidebar, Qt.Key_Down)           # stops at the end
+    assert item(win, "Gamma").selected
+    QTest.keyClick(sidebar, Qt.Key_Up)
+    assert item(win, "Beta").selected
+    assert win.browser.pane.title_label.text() == "Beta"
+
+
+def test_dividers_clear_beside_the_selection(win):
+    for name in ("Alpha", "Beta", "Gamma", "Delta"):
+        win.store.create_project(name)
+    choose(win, "Beta")                         # sorted: Alpha Beta Delta Gamma
+    dividers = win.browser.sidebar._dividers
+    assert [bool(d.property("clear")) for d in dividers] == [True, True, False]
+    # Cleared, not hidden: hiding would shift every item below by a pixel.
+    assert all(d.height() == 1 for d in dividers)
+
+
+# -- date view ----------------------------------------------------------
+
+
+def test_date_view_lists_the_four_buckets_with_counts(win):
     seed(win, offsets=((0, "Due|Today"), (-3, "Over|Due"), (1, "Due|Tomorrow"),
                        (4, "This|Week"), (30, "Far|Away")))
-    labels = [s.header_text for s in sections(win.date_view)]
-    assert len(labels) == 4
-    assert any(b.label in l for b in Bucket for l in labels)
-    assert any("Today" in l and "This" not in l and "(0/2)" in l for l in labels), labels
-    assert any("Tomorrow" in l and "(0/1)" in l for l in labels), labels
-    assert any("This Week" in l and "(0/3)" in l for l in labels), labels
-    assert any("Rest" in l and "(0/1)" in l for l in labels), labels
+    win.show_mode(Mode.DATE)
+    shown = details(win)
+    assert list(shown) == [b.label for b in Bucket]
+    assert shown["Today"].startswith("0/2")
+    assert shown["Tomorrow"].startswith("0/1")
+    assert shown["This Week"].startswith("0/3")
+    assert shown["Rest"].startswith("0/1")
+
+
+def test_today_is_selected_on_arrival(win):
+    seed(win)
+    win.show_mode(Mode.DATE)
+    assert item(win, "Today").selected
+    assert win.browser.pane.title_label.text() == "Today"
+    # Overdue work is surfaced alongside today's.
+    assert {r.task.name for r in rows(win)} == {"Wash|Dishes", "Call|Plumber"}
 
 
 def test_date_rows_name_their_project_and_mark_overdue(win):
     seed(win)
-    row = [r for r in rows(win.date_view) if r.task.name == "Call|Plumber"][0]
-    assert row.project_label.text() == "Home|Chores"
-    assert "overdue" in row.due_label.text()
-    assert row.due_label.property("overdue") is True
+    win.show_mode(Mode.DATE)
+    late = row(win, "Call|Plumber")
+    assert late.project_label.text() == "Home|Chores"
+    assert "overdue" in late.due_label.text()
+    assert late.due_label.property("overdue") is True
     # Only the due note is red; the project name stays quiet.
-    assert not row.project_label.property("overdue")
+    assert not late.project_label.property("overdue")
 
 
-def test_today_section_starts_open(win):
+def test_date_items_have_no_menu(win):
     seed(win)
-    today = [s for s in sections(win.date_view)
-             if "Today" in s.header_text and "This" not in s.header_text][0]
-    assert today.expanded
+    win.show_mode(Mode.DATE)
+    assert all(i.menu_button.isHidden() for i in items(win))
 
 
-def test_toggling_in_one_tab_updates_the_other(win):
+def test_ticking_in_one_view_shows_in_the_other(win):
     seed(win)
-    row = [r for r in rows(win.date_view) if r.task.name == "Call|Plumber"][0]
-    row.check.setChecked(True)
+    win.show_mode(Mode.DATE)
+    row(win, "Call|Plumber").check.setChecked(True)
     spin()
-    titles = [s.header_text for s in sections(win.projects_view)]
-    assert any("(1/3)" in t for t in titles), titles
+    win.show_mode(Mode.PROJECTS)
+    assert details(win)["Home|Chores"].startswith("1/3")
+    assert row(win, "Call|Plumber").check.isChecked()
 
 
-def test_ticking_a_box_updates_rows_in_place_instead_of_rebuilding(win):
+def test_ticking_a_box_updates_in_place_instead_of_rebuilding(win):
     """A rebuild destroyed the clicked checkbox and lagged ~1s on macOS."""
     seed(win)
-    sections(win.projects_view)[0].set_expanded(True, animate=False)
-    before = {id(r) for v in (win.projects_view, win.date_view) for r in rows(v)}
-    row = [r for r in rows(win.projects_view) if r.task.name == "Wash|Dishes"][0]
+    before = {id(w) for w in rows(win) + items(win)}
+    target = row(win, "Wash|Dishes")
 
-    row.check.setChecked(True)
+    target.check.setChecked(True)
     spin()
 
-    after = {id(r) for v in (win.projects_view, win.date_view) for r in rows(v)}
-    assert after == before
-    assert row in rows(win.projects_view) and row.check.isChecked()
+    assert {id(w) for w in rows(win) + items(win)} == before
+    assert target in rows(win) and target.check.isChecked()
     assert win.store_errors == []
 
 
-def test_a_tick_reaches_every_copy_of_the_task_and_every_count(win):
+def test_a_tick_reaches_every_bucket_count(win):
     seed(win)
-    row = [r for r in rows(win.projects_view) if r.task.name == "Wash|Dishes"][0]
-    row.check.setChecked(True)
+    win.show_mode(Mode.DATE)
+    row(win, "Wash|Dishes").check.setChecked(True)
     spin()
 
-    # Due today, so it sits in both Today and This Week.
-    copies = [r for r in rows(win.date_view) if r.task.name == "Wash|Dishes"]
-    assert len(copies) == 2
-    assert all(r.check.isChecked() and r.name_label.property("done") for r in copies)
-    labels = [s.header_text for s in sections(win.date_view)]
-    assert any("Today" in l and "This" not in l and "(1/2)" in l for l in labels), labels
-    assert any("This Week" in l and "(1/" in l for l in labels), labels
+    # Due today, so it counts in both Today and This Week.
+    shown = details(win)
+    assert shown["Today"].startswith("1/2")
+    assert shown["This Week"].startswith("1/2")
+    assert win.browser.pane.subtitle_label.text() == "1 of 2 done"
     assert "1 done" in win.counts_label.text()
 
 
 def test_unticking_works_in_place_too(win):
     seed(win)
-    row = [r for r in rows(win.date_view) if r.task.name == "Wash|Dishes"][0]
-    row.check.setChecked(True)
+    target = row(win, "Wash|Dishes")
+    target.check.setChecked(True)
     spin()
-    row.check.setChecked(False)
+    target.check.setChecked(False)
     spin()
-    stored = win.store.tasks_for_project(row.task.project_id)
+    stored = win.store.tasks_for_project(target.task.project_id)
     assert not any(t.is_completed for t in stored)
-    assert not row.name_label.property("done")
-    assert any("(0/3)" in s.header_text for s in sections(win.projects_view))
+    assert not target.name_label.property("done")
+    assert details(win)["Home|Chores"].startswith("0/3")
 
 
 def test_completing_an_overdue_task_clears_its_overdue_note(win):
     seed(win)
-    row = [r for r in rows(win.date_view) if r.task.name == "Call|Plumber"][0]
-    assert row.due_label.property("overdue") is True
-    row.check.setChecked(True)
+    win.show_mode(Mode.DATE)
+    late = row(win, "Call|Plumber")
+    assert late.due_label.property("overdue") is True
+    late.check.setChecked(True)
     spin()
-    assert row.due_label.property("overdue") is False
-    assert "overdue" not in row.due_label.text()
+    assert late.due_label.property("overdue") is False
+    assert "overdue" not in late.due_label.text()
 
 
 def test_each_change_is_announced_once(win):
@@ -361,20 +451,16 @@ def test_each_change_is_announced_once(win):
     assert len(changed) == 1 and ticked == [(task.id, True)]
 
 
-def test_the_closed_archive_is_not_rebuilt_until_opened(win):
-    from PySide6.QtCore import QPoint
-
+def test_each_view_remembers_its_own_selection(win):
     seed(win)
-    win.store.create_project("Spare|One")
-    menu = win.projects_view._project_menu(
-        [p for p in win.store.projects() if p.name == "Spare|One"][0], QPoint(0, 0)
-    )
-    _action(menu, "Archive project").trigger()
-    spin()
-    assert sections(win.archive_view) == []          # still closed, still stale
-
-    win.show_archive(True)
-    assert [s for s in sections(win.archive_view) if "Spare|One" in s.header_text]
+    win.store.create_project("Garden")
+    choose(win, "Home|Chores")
+    win.show_mode(Mode.DATE)
+    choose(win, "Tomorrow")
+    win.show_mode(Mode.PROJECTS)
+    assert item(win, "Home|Chores").selected
+    win.show_mode(Mode.DATE)
+    assert item(win, "Tomorrow").selected
 
 
 # -- chrome -------------------------------------------------------------
@@ -402,7 +488,7 @@ def test_a_long_database_path_shrinks_instead_of_the_counts(win):
     assert counts.width() >= counts.sizeHint().width()
     assert counts.geometry().right() < path.geometry().left()
     shown = path.displayed_text()
-    assert "\u2026" in shown
+    assert "…" in shown
     assert shown.endswith("todo.sqlite3")
     assert path.fontMetrics().horizontalAdvance(shown) <= path.contentsRect().width()
 
@@ -427,68 +513,14 @@ def test_add_button_offers_both_choices(win):
     menus[0].close()
 
 
-def test_no_storage_errors_during_normal_use(win):
-    seed(win)
-    sections(win.projects_view)[0].set_expanded(True, animate=False)
-    rows(win.projects_view)[0].check.setChecked(True)
-    spin()
-    assert win.store_errors == []
-
-
-# -- animation ----------------------------------------------------------
-
-
-def test_expand_and_collapse_animate_and_settle(win):
-    seed(win)
-    section = sections(win.projects_view)[0]
-    assert section.body.height() == 0
-
-    section.header.click()
-    spin(60)
-    assert section.body.maximumHeight() > 0       # mid-flight
-    spin(300)
-    assert section.expanded and section.body.height() > 50
-
-    section.header.click()
-    spin(300)
-    assert not section.expanded and section.body.height() == 0
-
-    section.header.click()
-    spin(300)
-    assert section.expanded and section.body.height() > 50
-
-
-def test_meta_text_is_available_before_the_row_is_shown(win):
-    from simpletodo.models import Task
-    from datetime import date, timedelta
-
-    task = Task(
-        name="Call|Plumber",
-        due_date=(date.today() - timedelta(days=2)).isoformat(),
-        project_id=1,
-        project_name="Home|Chores",
-    )
-    row = TaskRow(task, show_project=True)        # never shown
-    assert "Home|Chores" in row.meta_text
-    assert "overdue 2d" in row.meta_text
-
-    plain = TaskRow(task, show_project=False)
-    assert "Home|Chores" not in plain.meta_text
-
-
-# -- the + button and section alignment ---------------------------------
-
-
 def test_add_button_sits_top_left(win):
     spin(60)
-    button = win.add_button
-    assert button.pos().x() < win.width() / 2, "should be on the left"
-    assert button.pos().y() < win.height() / 2, "should be at the top"
+    button = win.add_button.mapTo(win, QPoint(0, 0))
+    assert button.x() < win.width() / 2, "should be on the left"
+    assert button.y() < win.height() / 2, "should be at the top"
 
 
 def test_add_menu_opens_downward(win):
-    from PySide6.QtCore import QPoint
-
     spin(60)
     anchor = win.add_button.mapToGlobal(QPoint(0, 0))
     win.add_button.click()
@@ -498,126 +530,122 @@ def test_add_menu_opens_downward(win):
     menu.close()
 
 
-def test_tab_bar_stays_centred_in_the_window(win):
-    from PySide6.QtCore import QPoint
-
-    spin(60)
-    bar = win.tabs.tabBar()
-    centre = bar.mapTo(win, QPoint(bar.width() // 2, 0)).x()
-    assert abs(centre - win.width() // 2) <= 2, "the + must not shift the tabs"
-
-
-def test_section_headers_share_one_left_edge(win):
+def test_no_storage_errors_during_normal_use(win):
     seed(win)
-    win.store.create_project("A much longer project name")
-    win.store.create_project("Short")
+    rows(win)[0].check.setChecked(True)
     spin()
-    lefts = {s.header.mapTo(win, s.header.rect().topLeft()).x()
-             for s in sections(win.projects_view)}
-    assert len(lefts) == 1, f"headers start at differing x: {lefts}"
+    assert win.store_errors == []
 
 
-def test_task_rows_are_indented_past_their_heading(win):
+def _stand_in(make):
+    """A dialog class whose exec() creates via *make* and announces it."""
+
+    class _Accept:
+        def __init__(self, *args, **kwargs):
+            self.created = _Signal()
+
+        def exec(self):
+            self.created.emit(make())
+            return 1
+
+    return _Accept
+
+
+def test_creating_a_project_selects_it(win, monkeypatch):
+    from simpletodo.ui import main_window
+
     seed(win)
-    section = sections(win.projects_view)[0]
-    section.set_expanded(True, animate=False)
+    monkeypatch.setattr(main_window, "CreateProjectDialog",
+                        _stand_in(lambda: win.store.create_project("Zebra")))
+    win.create_project()
     spin()
-    header_x = section.header.mapTo(win, section.header.rect().topLeft()).x()
-    row = rows(win.projects_view)[0]
-    row_x = row.check.mapTo(win, row.check.rect().topLeft()).x()
-    assert row_x > header_x, "tasks should sit in from their heading"
+    assert item(win, "Zebra").selected
+    assert win.browser.pane.title_label.text() == "Zebra"
 
 
-# -- vertical placement --------------------------------------------------
+def test_creating_a_task_from_the_archive_shows_its_project(win, monkeypatch):
+    from simpletodo.ui import main_window
+
+    project = seed(win)
+    win.store.create_project("Garden")
+    win.show_archive(True)
+    monkeypatch.setattr(main_window, "CreateTaskDialog", _stand_in(
+        lambda: win.store.create_task("New|One", "2030-01-01", project.id)))
+    win.create_task()
+    spin()
+    assert win.mode is Mode.PROJECTS and win.segments[Mode.PROJECTS].isChecked()
+    assert item(win, "Home|Chores").selected
+    assert "New|One" in [r.task.name for r in rows(win)]
 
 
-def _geometry(view):
-    """(gap above, content height, gap below, viewport height)."""
-    from PySide6.QtCore import QPoint
+class _Signal:
+    """Enough of a Qt signal for a stand-in dialog."""
 
-    spin(60)
-    viewport = view.scroll.viewport()
-    top = view.column.mapTo(viewport, QPoint(0, 0)).y()
-    height = view.column.height()
-    return top, height, viewport.height() - (top + height), viewport.height()
+    def __init__(self):
+        self._slots = []
+
+    def connect(self, slot):
+        self._slots.append(slot)
+
+    def emit(self, *args):
+        for slot in self._slots:
+            slot(*args)
 
 
-def test_a_short_list_sits_near_the_middle(win):
-    for n in range(3):
-        win.store.create_project(f"Project {n}")
+# -- layout -------------------------------------------------------------
+
+
+def test_the_sidebar_keeps_its_width_and_the_pane_takes_the_rest(win):
+    from simpletodo.ui.style import SIDEBAR_WIDTH
+
+    seed(win)
+    for width in (win.minimumWidth(), 1400):
+        win.resize(width, 600)
+        spin()
+        column = win.browser.sidebar.parentWidget()
+        assert column.width() == SIDEBAR_WIDTH
+        pane = win.browser.pane
+        assert pane.mapTo(win, QPoint(0, 0)).x() >= SIDEBAR_WIDTH
+        assert abs(pane.mapTo(win, QPoint(pane.width(), 0)).x() - win.width()) <= 1
+
+
+def test_a_long_task_list_scrolls_instead_of_squashing(win):
+    project = win.store.create_project("Busy")
+    for n in range(40):
+        win.store.create_task(f"Task {n:02d}", "2030-01-01", project.id)
     win.resize(700, 580)
-    top, height, below, viewport = _geometry(win.projects_view)
-
-    assert top > 60, f"content is still hugging the top bar (gap {top})"
-    assert below >= 0 and top + height <= viewport, "content must fit on screen"
-    assert abs(top - below) < viewport * 0.35, f"not centred: {top} vs {below}"
-
-
-def test_placement_follows_the_window_size(win):
-    for n in range(3):
-        win.store.create_project(f"Project {n}")
-
-    win.resize(640, 460)
-    small_top, _, _, _ = _geometry(win.projects_view)
-    win.resize(1400, 1000)
-    large_top, _, large_below, large_viewport = _geometry(win.projects_view)
-
-    assert large_top > small_top, "the gap should grow with the window"
-    assert abs(large_top - large_below) < large_viewport * 0.35
-
-    win.resize(640, 460)
-    back_top, _, _, _ = _geometry(win.projects_view)
-    assert abs(back_top - small_top) <= 2, "should return to where it was"
+    spin(80)
+    assert len(rows(win)) == 40
+    assert all(r.height() >= r.sizeHint().height() for r in rows(win))
+    assert win.browser.pane.scroll.verticalScrollBar().maximum() > 0
 
 
-def test_a_long_list_anchors_to_the_top_and_scrolls(win):
-    for n in range(25):
+def test_a_long_project_list_scrolls_the_sidebar(win):
+    for n in range(30):
         win.store.create_project(f"Project {n:02d}")
     win.resize(700, 580)
-    top, height, _, viewport = _geometry(win.projects_view)
-
-    assert top <= 20, f"a list taller than the window must start at the top ({top})"
-    assert height > viewport
-    assert win.projects_view.scroll.verticalScrollBar().maximum() > 0
+    spin(80)
+    assert all(i.height() >= i.sizeHint().height() for i in items(win))
+    assert win.browser.sidebar.scroll.verticalScrollBar().maximum() > 0
 
 
-def test_it_recentres_when_the_list_shrinks_again(win):
-    """Regression: the scroll widget kept the tallest height it had shown."""
-    for n in range(25):
-        win.store.create_project(f"Project {n:02d}")
-    win.resize(700, 580)
-    _geometry(win.projects_view)                      # render the tall list
-
-    for project in win.store.projects()[3:]:
-        win.store.delete_project(project.id)
-    top, height, below, viewport = _geometry(win.projects_view)
-
-    assert below >= 0, f"content was pushed below the fold (gap_below={below})"
-    assert top + height <= viewport
-    assert abs(top - below) < viewport * 0.35
-    assert win.projects_view.scroll.verticalScrollBar().maximum() == 0
-
-
-def test_collapsing_a_section_recentres(win):
+def test_a_short_list_starts_at_the_top(win):
     seed(win)
-    win.resize(700, 580)
-    section = sections(win.projects_view)[0]
-
-    section.set_expanded(True, animate=False)
-    _geometry(win.projects_view)
-    section.set_expanded(False, animate=False)
-    top, height, below, viewport = _geometry(win.projects_view)
-
-    assert below >= 0 and top + height <= viewport
-    assert abs(top - below) < viewport * 0.35
+    spin(60)
+    first = rows(win)[0]
+    y = first.mapTo(win.browser.pane, QPoint(0, 0)).y()
+    assert y < 150, f"tasks should sit under the heading, not mid-pane ({y})"
 
 
-def test_the_date_tab_is_placed_the_same_way(win):
-    seed(win)
-    win.resize(700, 580)
-    top, height, below, viewport = _geometry(win.date_view)
-    assert top > 20
-    assert below >= 0 and top + height <= viewport
+def test_long_sidebar_text_is_elided_not_clipped(win):
+    from simpletodo.ui.style import SIDEBAR_WIDTH
+
+    win.store.create_project("A" * 50)
+    spin(60)
+    entry = items(win)[0]
+    shown = entry.title_label.displayed_text()
+    assert shown.endswith("…")
+    assert entry.width() <= SIDEBAR_WIDTH
 
 
 # -- renaming and deleting ----------------------------------------------
@@ -644,6 +672,14 @@ def _confirm(answer):
 def _action(menu, text):
     """A menu action by its label -- positions shift as menus grow."""
     return next(a for a in menu.actions() if a.text() == text)
+
+
+def _press():
+    from PySide6.QtCore import QPointF
+    from PySide6.QtGui import QMouseEvent
+
+    return QMouseEvent(QMouseEvent.Type.MouseButtonPress, QPointF(5, 5),
+                       QPointF(5, 5), Qt.LeftButton, Qt.LeftButton, Qt.NoModifier)
 
 
 def test_rename_dialog_validates_like_create(win):
@@ -691,21 +727,21 @@ def test_rename_dialog_reports_the_new_name(win):
     assert dialog.new_name == "New name"
 
 
-def test_renaming_a_project_updates_both_tabs(win, monkeypatch):
+def test_renaming_a_project_updates_sidebar_pane_and_date_rows(win, monkeypatch):
     from simpletodo.ui import views
 
     seed(win)
     project = win.store.projects()[0]
     monkeypatch.setattr(views, "RenameDialog", _StubRename("Renamed Project"))
-    win.projects_view._rename_project(project)
+    win.browser._rename_project(project)
     spin()
 
     assert [p.name for p in win.store.projects()] == ["Renamed Project"]
-    assert any("Renamed Project" in s.header_text
-               for s in sections(win.projects_view))
-    # The Date tab prints project names beside each task.
-    assert all(r.project_label.text() == "Renamed Project"
-               for r in rows(win.date_view))
+    assert item(win, "Renamed Project").selected
+    assert win.browser.pane.title_label.text() == "Renamed Project"
+    # The Date view prints project names beside each task.
+    win.show_mode(Mode.DATE)
+    assert all(r.project_label.text() == "Renamed Project" for r in rows(win))
 
 
 def test_cancelling_a_rename_changes_nothing(win, monkeypatch):
@@ -714,7 +750,7 @@ def test_cancelling_a_rename_changes_nothing(win, monkeypatch):
     seed(win)
     project = win.store.projects()[0]
     monkeypatch.setattr(views, "RenameDialog", _StubRename("Nope", accept=False))
-    win.projects_view._rename_project(project)
+    win.browser._rename_project(project)
     spin()
     assert [p.name for p in win.store.projects()] == ["Home|Chores"]
 
@@ -723,14 +759,14 @@ def test_renaming_a_task(win, monkeypatch):
     from simpletodo.ui import views
 
     seed(win)
-    task = [t for t in win.store.tasks_for_project(win.store.projects()[0].id)
-            if t.name == "Buy|Bread"][0]
+    task = row(win, "Buy|Bread").task
     monkeypatch.setattr(views, "RenameDialog", _StubRename("Buy sourdough"))
-    win.projects_view._rename_task(task)
+    win.browser._rename_task(task)
     spin()
 
     names = {t.name for t in win.store.tasks_for_project(task.project_id)}
     assert "Buy sourdough" in names and "Buy|Bread" not in names
+    assert "Buy sourdough" in [r.task.name for r in rows(win)]
 
 
 def test_deleting_a_project_takes_its_tasks(win, monkeypatch):
@@ -738,13 +774,13 @@ def test_deleting_a_project_takes_its_tasks(win, monkeypatch):
 
     seed(win)
     project = win.store.projects()[0]
-    monkeypatch.setattr(views.QMessageBox, "question",
-                        _confirm(views.QMessageBox.Yes))
-    win.projects_view._delete_project(project)
+    monkeypatch.setattr(views, "confirm", _confirm(True))
+    win.browser._delete_project(project)
     spin()
 
     assert win.store.projects() == []
     assert win.store.counts() == (0, 0, 0)
+    assert "No projects yet" in win.browser.pane.message.text()
 
 
 def test_declining_the_delete_keeps_the_project(win, monkeypatch):
@@ -752,9 +788,8 @@ def test_declining_the_delete_keeps_the_project(win, monkeypatch):
 
     seed(win)
     project = win.store.projects()[0]
-    monkeypatch.setattr(views.QMessageBox, "question",
-                        _confirm(views.QMessageBox.No))
-    win.projects_view._delete_project(project)
+    monkeypatch.setattr(views, "confirm", _confirm(False))
+    win.browser._delete_project(project)
     spin()
     assert len(win.store.projects()) == 1
     assert win.store.counts()[1] == 3
@@ -764,47 +799,38 @@ def test_deleting_a_task_leaves_the_project(win, monkeypatch):
     from simpletodo.ui import views
 
     seed(win)
-    project = win.store.projects()[0]
-    task = win.store.tasks_for_project(project.id)[0]
-    monkeypatch.setattr(views.QMessageBox, "question",
-                        _confirm(views.QMessageBox.Yes))
-    win.projects_view._delete_task(task)
+    task = rows(win)[0].task
+    monkeypatch.setattr(views, "confirm", _confirm(True))
+    win.browser._delete_task(task)
     spin()
 
     assert len(win.store.projects()) == 1
     assert win.store.counts()[1] == 2
+    assert len(rows(win)) == 2
 
 
-def test_a_task_can_be_deleted_from_the_date_tab_too(win, monkeypatch):
+def test_a_task_can_be_deleted_from_the_date_view_too(win, monkeypatch):
     from simpletodo.ui import views
 
     seed(win)
-    task = rows(win.date_view)[0].task
-    monkeypatch.setattr(views.QMessageBox, "question",
-                        _confirm(views.QMessageBox.Yes))
-    win.date_view._delete_task(task)
+    win.show_mode(Mode.DATE)
+    task = rows(win)[0].task
+    monkeypatch.setattr(views, "confirm", _confirm(True))
+    win.browser._delete_task(task)
     spin()
     assert win.store.counts()[1] == 2
 
 
-def test_rows_and_headings_carry_a_menu_button(win):
+def test_rows_and_project_items_carry_a_menu_button(win):
     seed(win)
-    section = sections(win.projects_view)[0]
-    assert section.menu_button.isVisible() or not win.isVisible()
-    section.set_expanded(True, animate=False)
-    spin()
-    row = rows(win.projects_view)[0]
+    entry = items(win)[0]
+    assert not entry.menu_button.isHidden()
+    target = rows(win)[0]
 
     # Hidden until hovered, but always holding its place in the layout.
-    assert row.menu_button.property("revealed") is False
-    row._reveal_menu(True)
-    assert row.menu_button.property("revealed") is True
-
-
-def test_date_sections_have_no_project_menu(win):
-    seed(win)
-    for section in sections(win.date_view):
-        assert not section.menu_button.isVisible()
+    assert target.menu_button.property("revealed") is False
+    target._reveal_menu(True)
+    assert target.menu_button.property("revealed") is True
 
 
 # A popped-up menu carries WA_DeleteOnClose, so inspect it before the event
@@ -812,21 +838,15 @@ def test_date_sections_have_no_project_menu(win):
 
 
 def test_task_menu_offers_rename_and_delete(win):
-    from PySide6.QtCore import QPoint
-
     seed(win)
-    task = rows(win.date_view)[0].task
-    menu = win.date_view._task_menu(task, QPoint(0, 0))
+    menu = win.browser._task_menu(rows(win)[0].task, QPoint(0, 0))
     assert [a.text() for a in menu.actions()] == ["Rename…", "Delete task"]
     menu.close()
 
 
-def test_project_menu_offers_rename_and_delete(win):
-    from PySide6.QtCore import QPoint
-
+def test_project_menu_offers_rename_archive_and_delete(win):
     seed(win)
-    project = win.store.projects()[0]
-    menu = win.projects_view._project_menu(project, QPoint(0, 0))
+    menu = win.browser._project_menu(win.store.projects()[0], QPoint(0, 0))
     assert [a.text() for a in menu.actions()] == [
         "Rename…", "Archive project", "Delete project",
     ]
@@ -834,14 +854,11 @@ def test_project_menu_offers_rename_and_delete(win):
 
 
 def test_menu_delete_action_is_wired(win, monkeypatch):
-    from PySide6.QtCore import QPoint
     from simpletodo.ui import views
 
     seed(win)
-    project = win.store.projects()[0]
-    monkeypatch.setattr(views.QMessageBox, "question",
-                        _confirm(views.QMessageBox.Yes))
-    menu = win.projects_view._project_menu(project, QPoint(0, 0))
+    monkeypatch.setattr(views, "confirm", _confirm(True))
+    menu = win.browser._project_menu(win.store.projects()[0], QPoint(0, 0))
     _action(menu, "Delete project").trigger()
     spin()
     assert win.store.projects() == []
@@ -849,13 +866,11 @@ def test_menu_delete_action_is_wired(win, monkeypatch):
 
 
 def test_menu_rename_action_is_wired(win, monkeypatch):
-    from PySide6.QtCore import QPoint
     from simpletodo.ui import views
 
     seed(win)
-    project = win.store.projects()[0]
     monkeypatch.setattr(views, "RenameDialog", _StubRename("From The Menu"))
-    menu = win.projects_view._project_menu(project, QPoint(0, 0))
+    menu = win.browser._project_menu(win.store.projects()[0], QPoint(0, 0))
     _action(menu, "Rename…").trigger()
     spin()
     assert [p.name for p in win.store.projects()] == ["From The Menu"]
@@ -863,42 +878,47 @@ def test_menu_rename_action_is_wired(win, monkeypatch):
 
 def test_opening_a_menu_returns_instead_of_blocking(win):
     """Menus must popup(), not exec(): exec() would never return here."""
-    from PySide6.QtCore import QPoint
-
     seed(win)
-    menu = win.projects_view._project_menu(win.store.projects()[0], QPoint(0, 0))
+    menu = win.browser._project_menu(win.store.projects()[0], QPoint(0, 0))
     assert menu is not None              # reached only because popup() returned
     menu.close()
 
 
-def test_the_menu_button_requests_a_menu(win):
+def test_the_menu_buttons_request_menus(win):
     seed(win)
-    section = sections(win.projects_view)[0]
+    entry = items(win)[0]
     seen = []
-    section.menuRequested.connect(seen.append)
-    section.menu_button.click()
+    entry.menuRequested.connect(seen.append)
+    entry.menu_button.click()
     spin(20)
     assert len(seen) == 1
 
-    section.set_expanded(True, animate=False)
-    spin()
-    row = rows(win.projects_view)[0]
+    target = rows(win)[0]
     row_seen = []
-    row.menuRequested.connect(row_seen.append)
-    row.menu_button.click()
+    target.menuRequested.connect(row_seen.append)
+    target.menu_button.click()
     spin(20)
     assert len(row_seen) == 1
 
 
+def test_the_sidebar_menu_opens_for_the_right_project(win):
+    seed(win)
+    win.store.create_project("Garden")
+    opened = []
+    win.browser._project_menu = lambda project, position: opened.append(project.name)
+    item(win, "Home|Chores").menu_button.click()
+    spin(20)
+    assert opened == ["Home|Chores"]
+
+
 def test_revealing_the_menu_does_not_shift_the_row(win):
     seed(win)
-    sections(win.projects_view)[0].set_expanded(True, animate=False)
     spin()
-    row = rows(win.projects_view)[0]
-    before = (row.check.x(), row.due_label.x())
-    row._reveal_menu(True)
+    target = rows(win)[0]
+    before = (target.check.x(), target.due_label.x())
+    target._reveal_menu(True)
     spin(20)
-    assert (row.check.x(), row.due_label.x()) == before
+    assert (target.check.x(), target.due_label.x()) == before
 
 
 # -- task name reveals the description -----------------------------------
@@ -906,7 +926,6 @@ def test_revealing_the_menu_does_not_shift_the_row(win):
 
 def _click(widget):
     """Send a real press/release to *widget*."""
-    from PySide6.QtCore import QPoint, Qt
     from PySide6.QtGui import QMouseEvent
 
     where = QPoint(5, 5)
@@ -927,10 +946,7 @@ def _described_rows(win):
                           "Front tyre is flat and needs a new inner tube.")
     win.store.create_task("Buy bread", today, project.id)
     spin()
-    sections(win.projects_view)[0].set_expanded(True, animate=False)
-    spin()
-    by_name = {r.task.name: r for r in rows(win.projects_view)}
-    return by_name["Fix the bike"], by_name["Buy bread"]
+    return row(win, "Fix the bike"), row(win, "Buy bread")
 
 
 def test_clicking_the_name_does_not_complete_the_task(win):
@@ -991,17 +1007,7 @@ def test_the_checkbox_still_completes_the_task(win):
     assert stored.is_completed
 
 
-def test_a_completed_task_greys_its_name(win):
-    described, _ = _described_rows(win)
-    described.check.setChecked(True)
-    spin()
-    again = {r.task.name: r for r in rows(win.projects_view)}["Fix the bike"]
-    assert again.name_label.property("done") is True
-
-
 def test_the_description_lines_up_with_the_task_name(win):
-    from PySide6.QtCore import QPoint
-
     described, _ = _described_rows(win)
     described.set_description_shown(True, animate=False)
     spin()
@@ -1010,133 +1016,92 @@ def test_the_description_lines_up_with_the_task_name(win):
     assert abs(name_x - text_x) <= 2, f"name at {name_x}, description at {text_x}"
 
 
-def test_the_description_opens_in_the_date_tab_too(win):
+def test_the_description_opens_in_the_date_view_too(win):
     _described_rows(win)
-    win.tabs.setCurrentWidget(win.date_view)
+    win.show_mode(Mode.DATE)
     spin()
-    # A task due today appears under both Today and This Week; take the one in
-    # the open section, since a row in a closed section has no clickable area.
-    today = [s for s in sections(win.date_view)
-             if "Today" in s.header_text and "This" not in s.header_text][0]
-    row = {r.task.name: r for r in today.findChildren(TaskRow)}["Fix the bike"]
-    assert today.expanded
-
-    _click(row.name_label)
+    described = row(win, "Fix the bike")
+    _click(described.name_label)
     spin(260)
-    assert row.description_shown
-    assert not row.check.isChecked()
+    assert described.description_shown
+    assert not described.check.isChecked()
 
 
-def test_a_row_in_a_closed_section_ignores_clicks(win):
-    """The click guard is the hit rect, so a clipped row cannot be opened."""
-    described, _ = _described_rows(win)
-    section = sections(win.projects_view)[0]
-    section.set_expanded(False, animate=False)
-    spin(260)
-
-    row = {r.task.name: r for r in rows(win.projects_view)}["Fix the bike"]
-    _click(row.name_label)
-    spin(260)
-    assert not row.description_shown
-
-
-def test_revealing_a_description_keeps_the_list_on_screen(win):
-    described, _ = _described_rows(win)
-    win.resize(700, 580)
+def test_revealing_a_description_pushes_the_rows_below_down(win):
+    described, plain = _described_rows(win)     # same day: listed in order made
+    spin()
+    below = plain.mapTo(win.browser.pane, QPoint(0, 0)).y()
+    assert below > described.mapTo(win.browser.pane, QPoint(0, 0)).y()
     described.set_description_shown(True, animate=False)
-    top, height, below, viewport = _geometry(win.projects_view)
-    assert below >= 0 and top + height <= viewport
+    spin()
+    assert plain.mapTo(win.browser.pane, QPoint(0, 0)).y() > below
 
 
-# -- masthead, typewriter face and paper ---------------------------------
+# -- masthead and type --------------------------------------------------
 
 
 def test_the_masthead_reads_simple_to_do(win):
     assert win.title_label.text() == "Simple To Do"
 
 
-def test_the_masthead_persists_across_tabs(win):
+def test_the_masthead_persists_across_views(win):
+    for mode in Mode:
+        win.show_mode(mode)
+        spin()
+        assert win.title_label.isVisible(), f"the heading vanished in {mode}"
+
+
+def test_inter_ships_with_its_licence():
+    from simpletodo.ui.style import FONT_FILES, FONTS_DIR
+
+    for name in FONT_FILES:
+        assert (FONTS_DIR / name).stat().st_size > 0, f"missing {name}"
+    assert "SIL OPEN FONT LICENSE" in (FONTS_DIR / "LICENSE.txt").read_text().upper()
+
+
+def test_text_is_set_in_the_bundled_inter(win):
+    from PySide6.QtGui import QFont, QFontInfo
+
+    assert '"Inter"' in stylesheet(), "the stylesheet does not bind Inter"
     spin()
-    assert win.title_label.isVisible()
-    win.tabs.setCurrentWidget(win.date_view)
-    spin()
-    assert win.title_label.isVisible(), "the heading vanished on the Date tab"
-    win.tabs.setCurrentWidget(win.projects_view)
-    spin()
-    assert win.title_label.isVisible()
+    title = QFontInfo(win.title_label.font())
+    assert title.family() == "Inter", f"masthead rendered in {title.family()!r}"
+    assert title.weight() >= QFont.Bold
+    seed(win)
+    name = QFontInfo(rows(win)[0].name_label.font())
+    assert name.family() == "Inter"
 
 
-def test_the_masthead_lives_outside_the_tab_widget(win):
-    """Inside the tabs it would be swapped out with the page."""
-    assert not win.tabs.isAncestorOf(win.title_label)
+def test_the_ground_is_white_like_notes():
+    from simpletodo.ui.style import SURFACE
+
+    assert SURFACE.upper() == "#FFFFFF"
 
 
-def test_the_masthead_uses_a_typewriter_face(win):
-    from PySide6.QtGui import QFontInfo
-    from simpletodo.ui.style import TYPEWRITER_FAMILIES, resolve_typewriter_family
-
-    family = resolve_typewriter_family()
-    assert family, "no typewriter family resolved"
-    assert family in stylesheet(), "the stylesheet does not bind the face"
-
-    spin()
-    rendered = QFontInfo(win.title_label.font()).family()
-    assert rendered, "the heading has no resolved font"
-    # Either a face we asked for, or at least a fixed-pitch stand-in.
-    assert (
-        rendered in TYPEWRITER_FAMILIES
-        or QFontInfo(win.title_label.font()).fixedPitch()
-    ), f"heading rendered in {rendered!r}"
+# -- round checkboxes ---------------------------------------------------
 
 
-def test_the_paper_texture_ships_with_the_package():
-    from pathlib import Path
-
-    from simpletodo.ui.style import PAPER_URL
-
-    asset = Path(PAPER_URL)
-    assert asset.exists(), f"missing {asset}"
-    assert asset.stat().st_size > 0
-
-
-def test_the_paper_is_warm_and_not_white():
+def test_the_checkbox_is_round_and_fills_with_the_accent(win):
     from PySide6.QtGui import QColor
 
-    from simpletodo.ui.style import PAPER
+    from simpletodo.ui.style import ACCENT, CHECKBOX_SIZE
 
-    assert PAPER.upper() != "#FFFFFF", "the background is plain white"
-    colour = QColor(PAPER)
-    assert colour.red() > colour.blue(), "paper should be warm, not cool"
-    assert colour.red() > 240, "paper should still be light"
+    seed(win)
+    target = rows(win)[0]
+    target.check.setChecked(True)
+    spin()
+    image = target.check.grab().toImage()
+    image.setDevicePixelRatio(1)
+    scale = image.width() / target.check.width()
+    top = (target.check.height() - CHECKBOX_SIZE) / 2
 
+    def at(x, y):
+        return image.pixelColor(int(x * scale), int((top + y) * scale))
 
-def test_the_grain_tiles_across_the_whole_backdrop(app):
-    """Regression: `background-image` + `background-repeat` paints one tile.
-
-    Only the `background: url(...) repeat` shorthand tiles in this Qt, so a
-    large window would otherwise show grain in one corner and flat colour
-    everywhere else.
-    """
-    from PySide6.QtWidgets import QWidget
-
-    backdrop = QWidget()
-    backdrop.setObjectName("appBackdrop")
-    backdrop.setStyleSheet(stylesheet())
-    backdrop.resize(900, 700)
-    image = backdrop.grab().toImage()
-
-    def variance(x0, y0):
-        values = [
-            image.pixelColor(x, y).red()
-            for y in range(y0, y0 + 40)
-            for x in range(x0, x0 + 40)
-        ]
-        mean = sum(values) / len(values)
-        return sum((v - mean) ** 2 for v in values) / len(values)
-
-    corners = [(20, 20), (840, 20), (20, 640), (840, 640), (430, 330)]
-    for x, y in corners:
-        assert variance(x, y) > 1.0, f"no grain at ({x}, {y}) - tiling is broken"
+    # The corner of the indicator's box is outside the circle; a point inside
+    # the ring, clear of the tick, is the accent.
+    assert at(1, 1).name() != QColor(ACCENT).name(), "the indicator is square"
+    assert at(CHECKBOX_SIZE * 0.5, 3).name() == QColor(ACCENT).name()
 
 
 # -- rounded popups ------------------------------------------------------
@@ -1156,8 +1121,6 @@ def _corner_alphas(menu):
 
 def test_the_add_menu_is_a_translucent_frameless_popup(win):
     """Both are required: without them border-radius never shows."""
-    from PySide6.QtCore import Qt
-
     win.add_button.click()
     spin(40)
     menu = [m for m in win.findChildren(QMenu) if m.isVisible()][0]
@@ -1180,10 +1143,8 @@ def test_the_add_menu_corners_are_actually_rounded(win):
 
 
 def test_context_menus_are_rounded_too(win):
-    from PySide6.QtCore import QPoint, Qt
-
     seed(win)
-    menu = win.projects_view._project_menu(win.store.projects()[0], QPoint(0, 0))
+    menu = win.browser._project_menu(win.store.projects()[0], QPoint(0, 0))
     assert menu.testAttribute(Qt.WA_TranslucentBackground)
     assert menu.windowFlags() & Qt.FramelessWindowHint
     menu.close()
@@ -1200,52 +1161,49 @@ def test_the_menu_radius_is_in_the_stylesheet():
 
 
 def _archive_first_project(win):
-    from PySide6.QtCore import QPoint
-
-    menu = win.projects_view._project_menu(win.store.projects()[0], QPoint(0, 0))
+    menu = win.browser._project_menu(win.store.projects()[0], QPoint(0, 0))
     _action(menu, "Archive project").trigger()
     spin()
 
 
-def test_archiving_moves_a_project_out_of_both_tabs(win):
+def test_archiving_moves_a_project_out_of_projects_and_dates(win):
     seed(win)
     _archive_first_project(win)
 
-    assert sections(win.projects_view) == []
-    assert rows(win.date_view) == []
+    assert items(win) == []
+    win.show_mode(Mode.DATE)
+    assert all(i.detail_text.startswith("0/0") for i in items(win))
     win.show_archive(True)
-    archived = sections(win.archive_view)
-    assert len(archived) == 1 and "Home|Chores" in archived[0].header_text
+    assert [i.title for i in items(win)] == ["Home|Chores"]
 
 
 def test_archived_tasks_are_kept_and_visible_in_the_archive(win):
     seed(win)
     _archive_first_project(win)
     win.show_archive(True)
-    section = sections(win.archive_view)[0]
-    section.set_expanded(True, animate=False)
-    names = sorted(r.task.name for r in rows(win.archive_view))
-    assert names == ["Buy|Bread", "Call|Plumber", "Wash|Dishes"]
+    assert item(win, "Home|Chores").selected
+    assert sorted(r.task.name for r in rows(win)) == [
+        "Buy|Bread", "Call|Plumber", "Wash|Dishes",
+    ]
+    assert win.browser.pane.subtitle_label.text().startswith("Archived")
 
 
 def test_restoring_brings_a_project_back(win):
-    from PySide6.QtCore import QPoint
-
     seed(win)
     _archive_first_project(win)
     win.show_archive(True)               # restoring happens from inside it
-    assert len(sections(win.archive_view)) == 1
     archived = win.store.projects(archived=True)[0]
-    menu = win.archive_view._project_menu(archived, QPoint(0, 0))
+    menu = win.browser._project_menu(archived, QPoint(0, 0))
     assert [a.text() for a in menu.actions()] == [
         "Rename…", "Restore project", "Delete project",
     ]
     _action(menu, "Restore project").trigger()
     spin()
 
-    assert sections(win.archive_view) == []
+    assert items(win) == []
     assert [p.name for p in win.store.projects()] == ["Home|Chores"]
-    assert len(rows(win.date_view)) >= 3
+    win.show_mode(Mode.DATE)
+    assert details(win)["Today"].startswith("0/2")
 
 
 def test_archived_projects_are_not_offered_for_new_tasks(win):
@@ -1257,50 +1215,48 @@ def test_archived_projects_are_not_offered_for_new_tasks(win):
     assert offered == ["Home|Chores"]
 
 
-def test_the_archive_button_swaps_the_tabs_for_the_archive(win):
-    assert win.tabs.isVisible() and not win.archive_view.isVisible()
-
-    win.archive_button.click()
+def test_the_archive_is_a_segment_beside_projects_and_date(win):
+    win.segments[Mode.ARCHIVE].click()
     spin()
-    assert win.archive_button.isChecked()
-    assert win.archive_view.isVisible() and win.archive_heading.isVisible()
-    assert not win.tabs.isVisible()
+    assert win.mode is Mode.ARCHIVE
+    assert win.segments[Mode.ARCHIVE].isChecked()
+    assert not win.segments[Mode.PROJECTS].isChecked()
 
-    win.archive_button.click()
+    win.segments[Mode.DATE].click()
     spin()
-    assert win.tabs.isVisible() and not win.archive_view.isVisible()
-
-
-def test_the_archive_button_sits_under_the_plus(win):
-    from PySide6.QtCore import QPoint
-
-    plus = win.add_button.mapTo(win, QPoint(0, 0))
-    box = win.archive_button.mapTo(win, QPoint(0, 0))
-    assert box.x() == plus.x()
-    assert box.y() >= plus.y() + win.add_button.height()
+    assert win.mode is Mode.DATE and not win.segments[Mode.ARCHIVE].isChecked()
 
 
 def test_an_empty_archive_says_how_to_fill_it(win):
     win.show_archive(True)
-    texts = [l.text() for l in win.archive_view.column.findChildren(QLabel)]
-    assert any("Nothing archived" in t for t in texts), texts
+    assert "Nothing archived" in win.browser.pane.message.text()
+
+
+def test_escape_leaves_the_archive_for_the_view_it_came_from(win):
+    from PySide6.QtTest import QTest
+
+    win.show_mode(Mode.DATE)
+    win.show_archive(True)
+    # A window shortcut only fires in the active window. Detaching removed
+    # sidebar items once left the window impossible to activate; see _discard.
+    win.activateWindow()
+    assert QTest.qWaitForWindowActive(win)
+    QTest.keyClick(win, Qt.Key_Escape)
+    spin()
+    assert win.mode is Mode.DATE and win.segments[Mode.DATE].isChecked()
 
 
 def test_creating_a_project_leaves_the_archive(win, monkeypatch):
     from simpletodo.ui import main_window
 
-    class _Accept:
-        def __init__(self, *args, **kwargs):
-            pass
-
-        def exec(self):
-            return 1
-
-    monkeypatch.setattr(main_window, "CreateProjectDialog", _Accept)
     win.show_archive(True)
+    monkeypatch.setattr(main_window, "CreateProjectDialog",
+                        _stand_in(lambda: win.store.create_project("Fresh")))
     win.create_project()
-    assert not win.archive_view.isVisible()
-    assert win.tabs.currentWidget() is win.projects_view
+    spin()
+    assert win.mode is Mode.PROJECTS
+    assert win.segments[Mode.PROJECTS].isChecked()
+    assert item(win, "Fresh").selected
 
 
 def test_status_bar_counts_live_work_and_notes_the_archive(win):
@@ -1310,84 +1266,251 @@ def test_status_bar_counts_live_work_and_notes_the_archive(win):
     assert "1 archived" in win.counts_label.text()
 
 
-def test_the_archive_icon_is_crisp_on_retina(win):
-    from PySide6.QtCore import QSize
-
-    icon = win.archive_button.icon()
-    retina = icon.pixmap(QSize(18, 18), 2.0)
-    assert retina.width() == 36 and retina.devicePixelRatio() == 2.0
+# -- strikethrough and the icon's blue ----------------------------------
 
 
-def test_the_archive_glyph_takes_its_ink_from_the_tokens():
-    from simpletodo.ui.style import INK_SOFT, archive_icon_svg
-
-    assert INK_SOFT.encode() in archive_icon_svg()
-
-
-def _tab_centre(win, index):
-    bar = win.tabs.tabBar()
-    return bar, bar.tabRect(index).center()
-
-
-def test_the_tabs_stay_visible_as_the_way_back(win):
-    win.show_archive(True)
+def test_a_completed_task_is_struck_through(win):
+    seed(win)
+    target = row(win, "Buy|Bread")
+    assert not target.name_label.font().strikeOut()
+    target.check.setChecked(True)
     spin()
-    assert win.tabs.tabBar().isVisible()
-
-
-def test_clicking_the_current_tab_leaves_the_archive(win):
-    from PySide6.QtCore import Qt
-    from PySide6.QtTest import QTest
-
-    win.show_archive(True)
+    assert target.name_label.font().strikeOut()
+    target.check.setChecked(False)
     spin()
-    bar, centre = _tab_centre(win, win.tabs.currentIndex())
-    QTest.mouseClick(bar, Qt.LeftButton, Qt.NoModifier, centre)
-    spin()
-    assert not win.archive_view.isVisible() and win.tabs.isVisible()
-    assert not win.archive_button.isChecked()
+    assert not target.name_label.font().strikeOut()
 
 
-def test_clicking_the_other_tab_leaves_the_archive_for_that_tab(win):
-    from PySide6.QtCore import Qt
-    from PySide6.QtTest import QTest
+def test_the_accent_is_the_app_icons_blue():
+    from pathlib import Path
 
-    win.show_archive(True)
-    spin()
-    bar, centre = _tab_centre(win, 1)
-    QTest.mouseClick(bar, Qt.LeftButton, Qt.NoModifier, centre)
-    spin()
-    assert not win.archive_view.isVisible()
-    assert win.tabs.currentWidget() is win.date_view
+    from PySide6.QtGui import QColor, QImage
 
-
-def test_escape_leaves_the_archive(win):
-    from PySide6.QtCore import Qt
-    from PySide6.QtTest import QTest
-
-    win.show_archive(True)
-    spin()
-    QTest.keyClick(win, Qt.Key_Escape)
-    spin()
-    assert not win.archive_view.isVisible()
-
-
-def test_only_the_archive_label_is_underlined_while_open(win):
     from simpletodo.ui.style import ACCENT
 
-    win.show_archive(True)
+    icon = QImage(str(Path(__file__).resolve().parent.parent / "simpletodoappimage.jpg"))
+    sample = icon.pixelColor(icon.width() // 2, icon.height() // 8)
+    accent = QColor(ACCENT)
+    assert all(abs(a - b) <= 8 for a, b in zip(
+        (sample.red(), sample.green(), sample.blue()),
+        (accent.red(), accent.green(), accent.blue()),
+    )), f"icon {sample.name()} vs accent {ACCENT}"
+
+
+# -- the top bar --------------------------------------------------------
+
+
+def test_both_halves_of_the_top_bar_share_one_height(win):
     spin()
-    image = win.grab().toImage()
-    image.setDevicePixelRatio(1)
-    scale = image.width() / win.width()
-    bar = win.tabs.tabBar()
-    accent = ACCENT.lower()
+    assert win.sidebar_bar.height() == win.browser.top_bar.height() > 0
+    top = win.browser.top_bar.mapTo(win, QPoint(0, 0)).y()
+    assert top == win.sidebar_bar.mapTo(win, QPoint(0, 0)).y() == 0
 
-    def underlined(widget, rect):
-        top_left = widget.mapTo(win, rect.bottomLeft())
-        y = int((top_left.y() - 1) * scale)
-        xs = range(int(top_left.x() * scale), int((top_left.x() + rect.width()) * scale))
-        return any(image.pixelColor(x, y).name() == accent for x in xs)
 
-    assert underlined(win.archive_heading, win.archive_heading.rect())
-    assert not underlined(bar, bar.tabRect(bar.currentIndex()))
+def test_the_new_task_button_files_under_the_selected_project(win, monkeypatch):
+    from simpletodo.ui import main_window
+
+    seed(win)
+    garden = win.store.create_project("Garden")
+    choose(win, "Garden")
+    opened = []
+
+    class _Spy:
+        def __init__(self, store, parent, *, preselect_project_id=None):
+            opened.append(preselect_project_id)
+            self.created = _Signal()
+
+        def exec(self):
+            return 0
+
+    monkeypatch.setattr(main_window, "CreateTaskDialog", _Spy)
+    win.browser.compose_button.click()
+    assert opened == [garden.id]
+
+    win.show_mode(Mode.DATE)                 # no project in view
+    win.browser.compose_button.click()
+    assert opened == [garden.id, None]
+
+
+def test_the_more_button_opens_the_selected_projects_menu(win):
+    seed(win)
+    win.store.create_project("Garden")
+    choose(win, "Home|Chores")
+    opened = []
+    win.browser._project_menu = lambda project, position: opened.append(project.name)
+    win.browser.more_button.click()
+    assert opened == ["Home|Chores"]
+
+
+def test_the_more_button_is_off_without_a_project(win):
+    assert not win.browser.more_button.isEnabled()       # nothing yet
+    seed(win)
+    assert win.browser.more_button.isEnabled()
+    win.show_mode(Mode.DATE)
+    assert not win.browser.more_button.isEnabled()
+
+
+def test_search_filters_the_tasks_in_view(win):
+    project = seed(win)
+    win.store.create_task("Fix bike", "2030-01-01", project.id, "needs a new inner tube")
+    spin()
+    win.browser.search_field.setText("BREAD")
+    assert [r.task.name for r in rows(win) if not r.isHidden()] == ["Buy|Bread"]
+    win.browser.search_field.setText("tube")              # descriptions too
+    assert [r.task.name for r in rows(win) if not r.isHidden()] == ["Fix bike"]
+
+    win.browser.search_field.setText("zzz")
+    assert all(r.isHidden() for r in rows(win))
+    assert not win.browser.pane._no_match.isHidden()
+
+    win.browser.search_field.clear()
+    assert not any(r.isHidden() for r in rows(win))
+    assert win.browser.pane._no_match.isHidden()
+
+
+def test_search_survives_switching_project(win):
+    seed(win)
+    other = win.store.create_project("Garden")
+    win.store.create_task("Buy seeds", "2030-01-01", other.id)
+    win.store.create_task("Mow", "2030-01-01", other.id)
+    win.browser.search_field.setText("buy")
+    choose(win, "Garden")
+    assert [r.task.name for r in rows(win) if not r.isHidden()] == ["Buy seeds"]
+
+
+def test_the_top_bar_buttons_are_round(win):
+    from simpletodo.ui.style import TOOL_SIZE
+
+    button = win.browser.compose_button
+    assert button.height() == TOOL_SIZE
+    assert f"border-radius: {TOOL_SIZE // 2}px" in stylesheet()
+
+
+# -- dialogs look like a Notes sheet ------------------------------------
+
+
+def test_dialog_labels_sit_left_of_their_fields(win):
+    win.store.create_project("P")
+    dialog = CreateTaskDialog(win.store, win)
+    dialog.show()
+    spin()
+    grid = dialog.fields
+    for field in (dialog.name_edit, dialog.description_edit, dialog.date_edit,
+                  dialog.project_combo):
+        row_index, column, _, _ = grid.getItemPosition(grid.indexOf(field))
+        label = grid.itemAtPosition(row_index, 0).widget()
+        assert column == 1 and label.text().endswith(":")
+        assert label.geometry().right() < field.geometry().left()
+    dialog.close()
+
+
+def test_dialogs_have_cancel_left_of_the_commit_button(win):
+    dialog = CreateProjectDialog(win.store, win)
+    dialog.show()
+    spin()
+    cancel = dialog.cancel_button.mapTo(dialog, QPoint(0, 0))
+    commit = dialog.create_button.mapTo(dialog, QPoint(0, 0))
+    assert cancel.y() == commit.y() and cancel.x() < commit.x()
+    assert commit.x() + dialog.create_button.width() > dialog.width() * 0.8
+    dialog.close()
+
+
+def test_a_destructive_confirm_defaults_to_cancel(win):
+    from simpletodo.ui.dialogs import MessageDialog
+
+    dialog = MessageDialog("Delete Project", "Delete it?", win,
+                           confirm_text="Delete", destructive=True)
+    assert dialog.cancel_button.isDefault() and not dialog.create_button.isDefault()
+    assert dialog.create_button.text() == "Delete"
+
+
+def test_a_notice_has_a_single_button(win):
+    from simpletodo.ui.dialogs import MessageDialog
+
+    dialog = MessageDialog("Storage Problem", "Disk full.", win, cancel_text=None)
+    assert dialog.cancel_button.isHidden()
+    dialog.create_button.click()
+    assert dialog.result() == 1
+
+
+def test_dialogs_open_as_sheets_only_on_macos(win):
+    from PySide6.QtGui import QGuiApplication
+
+    dialog = CreateProjectDialog(win.store, win)
+    is_sheet = (dialog.windowFlags() & Qt.Sheet) == Qt.Sheet
+    assert is_sheet == (QGuiApplication.platformName() == "cocoa")
+
+
+def test_creating_a_task_with_no_projects_offers_a_project_first(win, monkeypatch):
+    from simpletodo.ui import main_window
+
+    asked = []
+    monkeypatch.setattr(main_window, "confirm",
+                        lambda *a, **k: asked.append(k["confirm_text"]) or False)
+    win.create_task()
+    assert asked == ["New Project"]
+
+
+# -- the task dialog remembers the last project -------------------------
+
+
+def _file_task(win, name, project_id=None):
+    dialog = CreateTaskDialog(win.store, win)
+    if project_id is not None:
+        dialog.project_combo.setCurrentIndex(dialog.project_combo.findData(project_id))
+    dialog.name_edit.setText(name)
+    dialog._on_create()
+    assert dialog.result() == 1
+    return dialog
+
+
+def test_the_next_task_starts_in_the_last_tasks_project(win):
+    win.store.create_project("Alpha")              # sorts first: the old default
+    beta = win.store.create_project("Beta")
+    _file_task(win, "One", beta.id)
+
+    again = CreateTaskDialog(win.store, win)
+    assert again.project_combo.currentData() == beta.id
+
+
+def test_the_project_can_still_be_changed(win):
+    alpha = win.store.create_project("Alpha")
+    beta = win.store.create_project("Beta")
+    _file_task(win, "One", beta.id)
+    _file_task(win, "Two", alpha.id)               # changed it by hand
+    assert CreateTaskDialog(win.store, win).project_combo.currentData() == alpha.id
+
+
+def test_the_remembered_project_beats_the_one_in_view(win):
+    alpha = win.store.create_project("Alpha")
+    beta = win.store.create_project("Beta")
+    _file_task(win, "One", beta.id)
+    dialog = CreateTaskDialog(win.store, win, preselect_project_id=alpha.id)
+    assert dialog.project_combo.currentData() == beta.id
+
+
+def test_the_memory_survives_a_restart(app, tmp_path):
+    path = tmp_path / "restart.sqlite3"
+    first = Database(path)
+    first.connect()
+    store = TodoStore(first)
+    store.create_project("Alpha")
+    beta = store.create_project("Beta")
+    store.create_task("One", "2030-01-01", beta.id)
+    first.close()
+
+    second = Database(path)
+    second.connect()
+    dialog = CreateTaskDialog(TodoStore(second))
+    assert dialog.project_combo.currentData() == beta.id
+    second.close()
+
+
+def test_an_archived_last_project_falls_back(win):
+    alpha = win.store.create_project("Alpha")
+    beta = win.store.create_project("Beta")
+    _file_task(win, "One", beta.id)
+    win.store.set_project_archived(beta.id, True)
+
+    dialog = CreateTaskDialog(win.store, win, preselect_project_id=alpha.id)
+    assert dialog.project_combo.currentData() == alpha.id

@@ -333,3 +333,14 @@ def test_an_archived_name_is_still_taken(db):
     home = db.add_project("Home")
     db.set_project_archived(home.id, True)
     assert db.project_exists("home")
+
+
+def test_the_last_task_project_is_remembered(db):
+    assert db.last_task_project_id() is None
+    home = db.add_project("Home")
+    work = db.add_project("Work")
+    db.add_task("A", iso(), home.id)
+    assert db.last_task_project_id() == home.id
+    db.add_task("B", iso(), work.id)
+    db.add_task("C", iso(), work.id)
+    assert db.last_task_project_id() == work.id

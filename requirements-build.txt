@@ -1,1 +1,2 @@
 pyinstaller>=6
+fonttools>=4.50

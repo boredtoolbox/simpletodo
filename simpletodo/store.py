@@ -62,6 +62,9 @@ class TodoStore(QObject):
     def archived_count(self) -> int:
         return self._guard(self._db.archived_count, default=0)
 
+    def last_task_project_id(self) -> int | None:
+        return self._guard(self._db.last_task_project_id, default=None)
+
     def project_exists(self, name: str, exclude_id: int | None = None) -> bool:
         return self._guard(
             lambda: self._db.project_exists(name, exclude_id), default=False

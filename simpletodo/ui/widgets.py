@@ -1,16 +1,10 @@
-"""The two building blocks both tabs are made of."""
+"""The building blocks of the sidebar and the task pane."""
 
 from __future__ import annotations
 
 from datetime import date
 
-from PySide6.QtCore import (
-    QEasingCurve,
-    QPoint,
-    QPropertyAnimation,
-    Qt,
-    Signal,
-)
+from PySide6.QtCore import QEasingCurve, QPoint, QPropertyAnimation, Qt, Signal
 from PySide6.QtGui import QCursor, QIcon, QPainter, QPixmap
 from PySide6.QtSvg import QSvgRenderer
 from PySide6.QtWidgets import (
@@ -20,13 +14,14 @@ from PySide6.QtWidgets import (
     QLabel,
     QMenu,
     QPushButton,
+    QScrollArea,
     QSizePolicy,
     QVBoxLayout,
     QWidget,
 )
 
 from ..models import Task
-from .style import CHECKBOX_SIZE, SPACE_1, SPACE_2, SPACE_3, SPACE_4, SPACE_6
+from .style import CHECKBOX_SIZE, ITEM_PADDING, SPACE_1, SPACE_2, SPACE_3, SPACE_4
 
 MENU_GLYPH = "\u22ef"   # midline horizontal ellipsis
 
@@ -76,6 +71,35 @@ def svg_icon(svg: bytes, side: int) -> QIcon:
     return icon
 
 
+class TopBar(QWidget):
+    """A strip that behaves like a title bar: drag to move, double-click to zoom.
+
+    On macOS the content runs up under a transparent title bar, so this strip
+    is where the traffic lights sit, and its empty parts are all there is to
+    grab the window by. Buttons inside it take their own clicks first.
+    """
+
+    def __init__(self, parent: QWidget | None = None) -> None:
+        super().__init__(parent)
+        self.setObjectName("topBar")
+
+    def mousePressEvent(self, event):  # noqa: N802 - Qt naming
+        handle = self.window().windowHandle()
+        if event.button() == Qt.LeftButton and handle is not None:
+            handle.startSystemMove()
+            event.accept()
+            return
+        super().mousePressEvent(event)
+
+    def mouseDoubleClickEvent(self, event):  # noqa: N802 - Qt naming
+        if event.button() == Qt.LeftButton:
+            window = self.window()
+            window.showNormal() if window.isMaximized() else window.showMaximized()
+            event.accept()
+            return
+        super().mouseDoubleClickEvent(event)
+
+
 class ClickableLabel(QLabel):
     """A label that reports clicks. QLabel has no clicked signal of its own."""
 
@@ -90,23 +114,30 @@ class ClickableLabel(QLabel):
 
 
 class ElidedLabel(QLabel):
-    """A one-line label that drops characters from the middle when squeezed.
+    """A one-line label that drops characters when squeezed.
 
     The status bar shares one row between the counts and a file path that can
-    be longer than the minimum window is wide. Eliding the middle keeps both
-    ends -- where the folder starts and the file name -- which are the parts
-    that identify a path.
+    be longer than the minimum window is wide. Eliding the middle, the
+    default, keeps both ends -- where the folder starts and the file name --
+    which are the parts that identify a path. Sidebar text elides at the end.
     """
 
-    def __init__(self, text: str = "", parent: QWidget | None = None) -> None:
+    def __init__(
+        self,
+        text: str = "",
+        parent: QWidget | None = None,
+        *,
+        elide: Qt.TextElideMode = Qt.ElideMiddle,
+    ) -> None:
         super().__init__(text, parent)
+        self._elide = elide
         # Without this the label's size hint is the full text, and the status
         # bar would rather clip the counts than shrink the path.
         self.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Preferred)
 
     def displayed_text(self) -> str:
         return self.fontMetrics().elidedText(
-            self.text(), Qt.ElideMiddle, self.contentsRect().width()
+            self.text(), self._elide, self.contentsRect().width()
         )
 
     def paintEvent(self, event):  # noqa: N802 - Qt naming
@@ -128,161 +159,98 @@ def _menu_button(parent: QWidget | None = None) -> QPushButton:
     return button
 
 
-ARROW_OPEN = "▼"    # down-pointing triangle
-ARROW_SHUT = "▶"    # right-pointing triangle
-
 #: Long enough to read as motion, short enough not to be in the way.
 ANIMATION_MS = 170
 
 
-class _HeadingButton(QPushButton):
-    """A button that sizes itself to the layout inside it.
+class SidebarItem(QFrame):
+    """One entry in the sidebar: a bold title over a two-tone second line.
 
-    QPushButton derives its size hint from its text. The heading's text lives
-    in child labels instead, so without this the button collapses to a few
-    pixels and clips them.
+    Laid out like a note in the Notes list -- the second line leads with a
+    dark fact (the X/Y count) and trails off into a muted preview, the next
+    task still to do.
     """
 
-    hoverChanged = Signal(bool)
-
-    def enterEvent(self, event):  # noqa: N802 - Qt naming
-        self.hoverChanged.emit(True)
-        super().enterEvent(event)
-
-    def leaveEvent(self, event):  # noqa: N802 - Qt naming
-        if not _pointer_inside(self):
-            self.hoverChanged.emit(False)
-        super().leaveEvent(event)
-
-    def sizeHint(self):  # noqa: N802 - Qt naming
-        layout = self.layout()
-        return layout.sizeHint() if layout is not None else super().sizeHint()
-
-    def minimumSizeHint(self):  # noqa: N802 - Qt naming
-        layout = self.layout()
-        return layout.minimumSize() if layout is not None else super().minimumSizeHint()
-
-
-class CollapsibleSection(QWidget):
-    """A heading that reveals its body with a slide.
-
-    The heading is one button holding three labels, so the title and its count
-    can differ in size and weight. The labels ignore the mouse, which leaves
-    the whole heading clickable and keyboard-focusable as a single control.
-    """
-
-    toggled = Signal(bool)
-    #: Someone asked for this section's menu, at a global position.
+    #: Pressed: select me.
+    chosen = Signal(object)
+    #: Someone asked for this item's menu, at a global position.
     menuRequested = Signal(QPoint)
 
     def __init__(
         self,
+        key: object,
         title: str,
-        parent: QWidget | None = None,
         *,
         with_menu: bool = False,
+        parent: QWidget | None = None,
     ) -> None:
         super().__init__(parent)
-        self._title = title
+        self.setObjectName("sidebarItem")
+        self.setProperty("selected", False)
+        self.setSizePolicy(QSizePolicy.Preferred, QSizePolicy.Fixed)
+        self.key = key
         self._with_menu = with_menu
-        self._count_text = ""
-        self._expanded = False
 
-        self.header = _HeadingButton()
-        self.header.setObjectName("sectionHeader")
-        # Fixed height: a heading is exactly as tall as its content and must
-        # never be compressed to fit, or a long list squashes every row.
-        self.header.setSizePolicy(QSizePolicy.Preferred, QSizePolicy.Fixed)
-        self.header.setCursor(Qt.PointingHandCursor)
-        self.header.setFocusPolicy(Qt.TabFocus)
-        self.header.clicked.connect(self.toggle)
-
-        self._arrow = QLabel(ARROW_SHUT)
-        self._arrow.setObjectName("sectionArrow")
-        self._arrow.setFixedWidth(SPACE_3)
-        self._title_label = QLabel(title)
-        self._title_label.setObjectName("sectionTitle")
-        self._count_label = QLabel("")
-        self._count_label.setObjectName("sectionCount")
-        for label in (self._arrow, self._title_label, self._count_label):
+        self.title_label = ElidedLabel(title, elide=Qt.ElideRight)
+        self.title_label.setObjectName("itemTitle")
+        self.title_label.setToolTip(title)
+        self.strong_label = QLabel("")
+        self.strong_label.setObjectName("itemStrong")
+        self.soft_label = ElidedLabel("", elide=Qt.ElideRight)
+        self.soft_label.setObjectName("itemSoft")
+        for label in (self.title_label, self.strong_label, self.soft_label):
             label.setAttribute(Qt.WA_TransparentForMouseEvents, True)
 
         self.menu_button = _menu_button()
         self.menu_button.setVisible(with_menu)
         self.menu_button.clicked.connect(self._request_menu_at_button)
-        if with_menu:
-            self.header.hoverChanged.connect(self._reveal_menu)
 
-        heading = QHBoxLayout(self.header)
-        heading.setContentsMargins(SPACE_1, SPACE_3, SPACE_1, SPACE_3)
-        heading.setSpacing(SPACE_2)
-        heading.addWidget(self._arrow)
-        heading.addWidget(self._title_label)
-        heading.addWidget(self._count_label)
-        heading.addStretch(1)
-        heading.addWidget(self.menu_button)
+        top = QHBoxLayout()
+        top.setContentsMargins(0, 0, 0, 0)
+        top.setSpacing(SPACE_1)
+        top.addWidget(self.title_label, 1)
+        top.addWidget(self.menu_button)
 
-        self.body = QWidget()
-        self.body.setObjectName("sectionBody")
-        self._body_layout = QVBoxLayout(self.body)
-        self._body_layout.setContentsMargins(0, SPACE_2, 0, SPACE_2)
-        self._body_layout.setSpacing(SPACE_1)
-
-        # Animating maximumHeight keeps the slide cheap and flicker-free.
-        self.body.setMaximumHeight(0)
-        self.body.setSizePolicy(QSizePolicy.Preferred, QSizePolicy.Fixed)
-
-        self._anim = QPropertyAnimation(self.body, b"maximumHeight", self)
-        self._anim.setDuration(ANIMATION_MS)
-        self._anim.setEasingCurve(QEasingCurve.InOutCubic)
-        self._anim.finished.connect(self._on_anim_finished)
-
-        # Likewise the section as a whole: its height is its content's height.
-        self.setSizePolicy(QSizePolicy.Preferred, QSizePolicy.Fixed)
+        second = QHBoxLayout()
+        second.setContentsMargins(0, 0, 0, 0)
+        second.setSpacing(SPACE_2)
+        second.addWidget(self.strong_label)
+        second.addWidget(self.soft_label, 1)
 
         outer = QVBoxLayout(self)
-        outer.setContentsMargins(0, 0, 0, 0)
-        outer.setSpacing(0)
-        outer.addWidget(self.header)
-        outer.addWidget(self.body)
-
-    # -- content --------------------------------------------------------
+        outer.setContentsMargins(ITEM_PADDING, SPACE_2 + 2, SPACE_2, SPACE_2 + 2)
+        outer.setSpacing(2)
+        outer.addLayout(top)
+        outer.addLayout(second)
 
     @property
-    def content_layout(self) -> QVBoxLayout:
-        return self._body_layout
-
-    def clear(self) -> None:
-        while self._body_layout.count():
-            item = self._body_layout.takeAt(0)
-            widget = item.widget()
-            if widget is not None:
-                widget.setParent(None)
-                widget.deleteLater()
-
-    def add_row(self, widget: QWidget) -> None:
-        self._body_layout.addWidget(widget)
-
-    def set_counts(self, done: int, total: int) -> None:
-        self._count_text = f"({done}/{total})"
-        self._refresh_header()
-
-    def set_title(self, title: str) -> None:
-        self._title = title
-        self._refresh_header()
+    def title(self) -> str:
+        return self.title_label.text()
 
     @property
-    def header_text(self) -> str:
-        """The heading as one string: arrow, title, count."""
-        parts = [self._arrow.text(), self._title_label.text()]
-        if self._count_label.text():
-            parts.append(self._count_label.text())
-        return "  ".join(parts)
+    def detail_text(self) -> str:
+        """The second line as one string."""
+        return "  ".join(t for t in (self.strong_label.text(), self.soft_label.text()) if t)
 
-    def _refresh_header(self) -> None:
-        self._arrow.setText(ARROW_OPEN if self._expanded else ARROW_SHUT)
-        self._title_label.setText(self._title)
-        self._count_label.setText(self._count_text)
+    def set_detail(self, strong: str, soft: str) -> None:
+        self.strong_label.setText(strong)
+        self.soft_label.setText(soft)
+
+    @property
+    def selected(self) -> bool:
+        return bool(self.property("selected"))
+
+    def set_selected(self, selected: bool) -> None:
+        self.setProperty("selected", selected)
+        restyle(self)
+
+    def mousePressEvent(self, event):  # noqa: N802 - Qt naming
+        # On press, as Notes does: selection should feel immediate.
+        if event.button() == Qt.LeftButton:
+            self.chosen.emit(self.key)
+            event.accept()
+            return
+        super().mousePressEvent(event)
 
     # -- menu -----------------------------------------------------------
 
@@ -291,10 +259,18 @@ class CollapsibleSection(QWidget):
         restyle(self.menu_button)
 
     def _request_menu_at_button(self) -> None:
-        corner = self.menu_button.mapToGlobal(
-            QPoint(0, self.menu_button.height())
-        )
+        corner = self.menu_button.mapToGlobal(QPoint(0, self.menu_button.height()))
         self.menuRequested.emit(corner)
+
+    def enterEvent(self, event):  # noqa: N802 - Qt naming
+        if self._with_menu:
+            self._reveal_menu(True)
+        super().enterEvent(event)
+
+    def leaveEvent(self, event):  # noqa: N802 - Qt naming
+        if self._with_menu and not _pointer_inside(self):
+            self._reveal_menu(False)
+        super().leaveEvent(event)
 
     def contextMenuEvent(self, event):  # noqa: N802 - Qt naming
         if self._with_menu:
@@ -302,63 +278,6 @@ class CollapsibleSection(QWidget):
             event.accept()
         else:
             super().contextMenuEvent(event)
-
-    # -- open / shut ----------------------------------------------------
-
-    @property
-    def expanded(self) -> bool:
-        return self._expanded
-
-    def toggle(self) -> None:
-        self.set_expanded(not self._expanded)
-
-    def set_expanded(self, expanded: bool, *, animate: bool = True) -> None:
-        if expanded == self._expanded:
-            return
-        self._expanded = expanded
-        self._refresh_header()
-
-        target = self._natural_height() if expanded else 0
-        self._anim.stop()
-        if not animate:
-            self.body.setMaximumHeight(target)
-            self._on_anim_finished()
-            self._propagate()
-        else:
-            self._anim.setStartValue(self.body.maximumHeight())
-            self._anim.setEndValue(target)
-            self._anim.start()
-        self.toggled.emit(expanded)
-
-    def refit(self) -> None:
-        """Re-measure an open body after its rows changed."""
-        if self._expanded and self._anim.state() != QPropertyAnimation.Running:
-            self.body.setMaximumHeight(self._natural_height())
-
-    def _natural_height(self) -> int:
-        self.body.layout().activate()
-        return max(self.body.sizeHint().height(), 1)
-
-    def _on_anim_finished(self) -> None:
-        if self._expanded:
-            # Release the cap so the body can grow with its content.
-            self.body.setMaximumHeight(16_777_215)
-        self._propagate()
-
-    def _propagate(self) -> None:
-        """Tell the ancestors our preferred height changed."""
-        self.body.updateGeometry()
-        self.updateGeometry()
-        parent = self.parentWidget()
-        while parent is not None:
-            layout = parent.layout()
-            if layout is not None:
-                layout.invalidate()
-                # activate() as well, so a scroll area shrinks its widget back
-                # when a section closes and the list re-centres.
-                layout.activate()
-            parent.updateGeometry()
-            parent = parent.parentWidget()
 
 
 class TaskRow(QFrame):
@@ -380,6 +299,9 @@ class TaskRow(QFrame):
     ) -> None:
         super().__init__(parent)
         self.setObjectName("taskRow")
+        # A row is exactly as tall as its content: in a long list the pane
+        # scrolls rather than squeezing every row to its minimum.
+        self.setSizePolicy(QSizePolicy.Preferred, QSizePolicy.Fixed)
         self.task = task
 
         # The checkbox carries no label: its text used to be the task name, so
@@ -425,8 +347,7 @@ class TaskRow(QFrame):
         self.line = QWidget()
         self.line.setObjectName("taskLine")
         row = QHBoxLayout(self.line)
-        # Indented past the heading so tasks read as nested under it.
-        row.setContentsMargins(SPACE_6, SPACE_1, SPACE_2, SPACE_1)
+        row.setContentsMargins(SPACE_2, SPACE_1, SPACE_2, SPACE_1)
         row.setSpacing(SPACE_3)
         row.addWidget(self.check)
         row.addWidget(self.name_label)
@@ -446,7 +367,7 @@ class TaskRow(QFrame):
         panel = QVBoxLayout(self.description_panel)
         # Indented to sit under the task name, not under the checkbox.
         panel.setContentsMargins(
-            SPACE_6 + CHECKBOX_SIZE + SPACE_3, 0, SPACE_4, SPACE_2
+            SPACE_2 + CHECKBOX_SIZE + SPACE_3, 0, SPACE_4, SPACE_2
         )
         panel.setSpacing(0)
         panel.addWidget(self.description_label)
@@ -570,6 +491,30 @@ class TaskRow(QFrame):
     def contextMenuEvent(self, event):  # noqa: N802 - Qt naming
         self.menuRequested.emit(event.globalPos())
         event.accept()
+
+
+def settle_scroll(scroll: QScrollArea) -> None:
+    """Fit a resizable scroll area's widget to its content, now.
+
+    QScrollArea refits its widget only on a deferred LayoutRequest, and a
+    layout ignores children that are not yet visible -- Qt shows freshly
+    added ones on the next event-loop turn. After a burst of rebuilds the
+    widget kept the viewport's height and every row was squashed to a
+    sliver. Showing the children and applying the fit synchronously avoids
+    both; see test_a_long_task_list_scrolls_instead_of_squashing.
+    """
+    holder = scroll.widget()
+    if holder is None or holder.layout() is None:
+        return
+    for child in holder.findChildren(QWidget, options=Qt.FindDirectChildrenOnly):
+        if not child.testAttribute(Qt.WA_WState_ExplicitShowHide):
+            child.show()
+    holder.layout().invalidate()
+    holder.layout().activate()
+    viewport = scroll.viewport()
+    wanted = max(viewport.height(), holder.sizeHint().height())
+    if holder.height() != wanted:
+        holder.resize(viewport.width(), wanted)
 
 
 def restyle(widget: QWidget) -> None:

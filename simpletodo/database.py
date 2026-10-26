@@ -257,6 +257,19 @@ class Database:
         task.id = cur.lastrowid
         return task
 
+    def last_task_project_id(self) -> int | None:
+        """The project the most recently created task was filed under.
+
+        This is what the Create Task dialog offers first: someone adding a
+        run of tasks to one project should not have to pick it every time.
+        Read from the tasks themselves, so it survives a restart with no
+        extra table.
+        """
+        row = self._read(
+            "SELECT project_id FROM tasks ORDER BY id DESC LIMIT 1"
+        ).fetchone()
+        return row["project_id"] if row else None
+
     def tasks_for_project(self, project_id: int) -> list[Task]:
         rows = self._read(
             """

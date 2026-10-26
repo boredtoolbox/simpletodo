@@ -4,11 +4,11 @@ A minimalist to-do app for macOS and Ubuntu. It works entirely offline: no
 accounts, no network calls, no telemetry. Your tasks are stored in one SQLite
 file on your own disk.
 
-![Projects tab](docs/projects.png)
+![Projects view](docs/projects.png)
 
 ## Download (macOS, Apple Silicon)
 
-Download `SimpleTodo-1.0.1-macos-arm64.zip` from the
+Download `SimpleTodo-1.1.0-macos-arm64.zip` from the
 [latest release](https://github.com/boredtoolbox/simpletodo/releases/latest),
 unzip it, and drag `SimpleTodo.app` into Applications. The app is unsigned, so
 the first time you open it, right-click it and choose **Open**. If macOS still
@@ -33,7 +33,9 @@ python3 -m venv .venv
 .venv/bin/python run.py
 ```
 
-The only dependency is PySide6 (Qt 6).
+The only dependency is PySide6 (Qt 6). The app is set in
+[Inter](https://rsms.me/inter/), bundled under the SIL Open Font License
+(`simpletodo/ui/assets/fonts/LICENSE.txt`).
 
 If pip says it "can not perform a '--user' install", run the install line as
 `PIP_USER=0 .venv/bin/python -m pip install -r requirements.txt`.
@@ -52,14 +54,20 @@ first time you open it, right-click it and choose **Open**.
 
 ## Using it
 
-- **+** (top left) creates a project or a task.
-- **Projects** tab: click a project to expand it. Tick a checkbox to complete a
-  task, and click a task's name to read its description.
-- **Date** tab: tasks are grouped into Today, Tomorrow, This Week and Rest.
-  Overdue tasks show up in Today, in red.
+- **+** (top of the sidebar) creates a project or a task. The pencil button
+  above the tasks adds a task; the dialog starts on the project you used for
+  your last task, so a run of tasks needs no re-picking. **⋯** renames,
+  archives or deletes that project, and **Search** filters the tasks shown.
+- Ticking a task strikes it through.
+- The switch under the title picks what the sidebar lists. **Projects** lists
+  your projects; select one to see its tasks on the right. Tick a checkbox to
+  complete a task, and click a task's name to read its description.
+- **Date** lists Today, Tomorrow, This Week and Rest. Overdue tasks show up in
+  Today, in red.
+- **Archive** lists archived projects, where you can restore them. Esc goes
+  back to the view you came from.
 - Hover a project or task and click **⋯** (or right-click it) to rename,
-  delete or archive it. The box button under **+** opens the archive, where
-  you can restore projects.
+  delete or archive it. The arrow keys move through the sidebar.
 
 ## Your data
 
