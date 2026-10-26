@@ -321,6 +321,11 @@ class Database:
     def rename_task(self, task_id: int, name: str) -> None:
         self._write("UPDATE tasks SET name = ? WHERE id = ?", (name.strip(), task_id))
 
+    def move_task(self, task_id: int, project_id: int) -> None:
+        self._write(
+            "UPDATE tasks SET project_id = ? WHERE id = ?", (project_id, task_id)
+        )
+
     def delete_task(self, task_id: int) -> None:
         self._write("DELETE FROM tasks WHERE id = ?", (task_id,))
 

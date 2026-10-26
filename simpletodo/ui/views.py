@@ -558,11 +558,24 @@ class Browser(QWidget):
         menu.addAction("Rename…").triggered.connect(
             lambda: self._rename_task(task)
         )
+        menu.addMenu(self._move_menu(task, menu))
         menu.addAction("Delete task").triggered.connect(
             lambda: self._delete_task(task)
         )
         menu.popup(position)
         return menu
+
+    def _move_menu(self, task: Task, parent: QMenu) -> QMenu:
+        """Every other live project, as somewhere to send *task*."""
+        move = rounded_menu(parent)
+        move.setTitle("Move to")
+        targets = [p for p in self.store.projects() if p.id != task.project_id]
+        for project in targets:
+            move.addAction(project.name).triggered.connect(
+                lambda _=False, pid=project.id: self.store.move_task(task.id, pid)
+            )
+        move.setEnabled(bool(targets))
+        return move
 
     def _rename_task(self, task: Task) -> None:
         dialog = RenameDialog(

@@ -8,7 +8,7 @@ file on your own disk.
 
 ## Download (macOS, Apple Silicon)
 
-Download `SimpleTodo-1.1.0-macos-arm64.zip` from the
+Download `SimpleTodo-1.1.1-macos-arm64.zip` from the
 [latest release](https://github.com/boredtoolbox/simpletodo/releases/latest),
 unzip it, and drag `SimpleTodo.app` into Applications. The app is unsigned, so
 the first time you open it, right-click it and choose **Open**. If macOS still
@@ -67,7 +67,8 @@ first time you open it, right-click it and choose **Open**.
 - **Archive** lists archived projects, where you can restore them. Esc goes
   back to the view you came from.
 - Hover a project or task and click **⋯** (or right-click it) to rename,
-  delete or archive it. The arrow keys move through the sidebar.
+  delete or archive it. A task's menu also has **Move to**, to send it to a
+  different project. The arrow keys move through the sidebar.
 
 ## Your data
 

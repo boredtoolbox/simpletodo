@@ -840,7 +840,7 @@ def test_rows_and_project_items_carry_a_menu_button(win):
 def test_task_menu_offers_rename_and_delete(win):
     seed(win)
     menu = win.browser._task_menu(rows(win)[0].task, QPoint(0, 0))
-    assert [a.text() for a in menu.actions()] == ["Rename…", "Delete task"]
+    assert [a.text() for a in menu.actions()] == ["Rename…", "Move to", "Delete task"]
     menu.close()
 
 
@@ -1514,3 +1514,74 @@ def test_an_archived_last_project_falls_back(win):
 
     dialog = CreateTaskDialog(win.store, win, preselect_project_id=alpha.id)
     assert dialog.project_combo.currentData() == alpha.id
+
+
+# -- moving a task to another project -----------------------------------
+
+
+def _move_menu(win, task):
+    menu = win.browser._task_menu(task, QPoint(0, 0))
+    return menu, _action(menu, "Move to").menu()
+
+
+def test_move_to_lists_every_other_live_project(win):
+    seed(win)
+    win.store.create_project("Garden")
+    win.store.create_project("Attic")
+    archived = win.store.create_project("Old")
+    win.store.set_project_archived(archived.id, True)
+    choose(win, "Home|Chores")
+
+    menu, move = _move_menu(win, rows(win)[0].task)
+    assert [a.text() for a in move.actions()] == ["Attic", "Garden"]
+    assert move.testAttribute(Qt.WA_TranslucentBackground)      # rounded too
+    menu.close()
+
+
+def test_moving_a_task_files_it_under_the_new_project(win):
+    seed(win)
+    garden = win.store.create_project("Garden")
+    choose(win, "Home|Chores")
+    task = row(win, "Buy|Bread").task
+
+    menu, move = _move_menu(win, task)
+    _action(move, "Garden").trigger()
+    spin()
+
+    assert "Buy|Bread" not in [r.task.name for r in rows(win)]
+    assert [t.name for t in win.store.tasks_for_project(garden.id)] == ["Buy|Bread"]
+    shown = details(win)
+    assert shown["Home|Chores"].startswith("0/2")
+    assert shown["Garden"].startswith("0/1")
+    assert win.store_errors == []
+
+
+def test_a_moved_task_keeps_its_state(win):
+    seed(win)
+    garden = win.store.create_project("Garden")
+    choose(win, "Home|Chores")
+    task = row(win, "Buy|Bread").task
+    win.store.set_task_completed(task.id, True)
+
+    win.store.move_task(task.id, garden.id)
+    moved = win.store.tasks_for_project(garden.id)[0]
+    assert moved.is_completed and moved.due_date == task.due_date
+
+
+def test_move_to_is_off_with_nowhere_to_go(win):
+    seed(win)
+    menu, move = _move_menu(win, rows(win)[0].task)
+    assert not move.isEnabled() and move.actions() == []
+    menu.close()
+
+
+def test_a_task_can_be_moved_from_the_date_view(win):
+    seed(win)
+    garden = win.store.create_project("Garden")
+    win.show_mode(Mode.DATE)
+    task = row(win, "Wash|Dishes").task
+    menu, move = _move_menu(win, task)
+    _action(move, "Garden").trigger()
+    spin()
+    assert row(win, "Wash|Dishes").project_label.text() == "Garden"
+    assert [t.name for t in win.store.tasks_for_project(garden.id)] == ["Wash|Dishes"]

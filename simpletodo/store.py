@@ -105,6 +105,14 @@ class TodoStore(QObject):
             self.changed.emit()
         return bool(ok)
 
+    def move_task(self, task_id: int, project_id: int) -> bool:
+        ok = self._guard(
+            lambda: (self._db.move_task(task_id, project_id), True)[1], default=False
+        )
+        if ok:
+            self.changed.emit()
+        return bool(ok)
+
     def set_task_completed(self, task_id: int, completed: bool) -> bool:
         ok = self._guard(
             lambda: (self._db.set_task_completed(task_id, completed), True)[1],

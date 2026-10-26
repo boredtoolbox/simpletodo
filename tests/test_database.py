@@ -344,3 +344,14 @@ def test_the_last_task_project_is_remembered(db):
     db.add_task("B", iso(), work.id)
     db.add_task("C", iso(), work.id)
     assert db.last_task_project_id() == work.id
+
+
+def test_a_task_moves_between_projects(db):
+    home = db.add_project("Home")
+    work = db.add_project("Work")
+    task = db.add_task("A", iso(), home.id, "detail")
+    db.move_task(task.id, work.id)
+    assert db.tasks_for_project(home.id) == []
+    [moved] = db.tasks_for_project(work.id)
+    assert (moved.name, moved.description) == ("A", "detail")
+
