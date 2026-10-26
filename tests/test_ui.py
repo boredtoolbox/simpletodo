@@ -1585,3 +1585,128 @@ def test_a_task_can_be_moved_from_the_date_view(win):
     spin()
     assert row(win, "Wash|Dishes").project_label.text() == "Garden"
     assert [t.name for t in win.store.tasks_for_project(garden.id)] == ["Wash|Dishes"]
+
+
+# -- the pickers look like the app's menus ------------------------------
+
+
+def _task_dialog(win):
+    for name in ("Alpha", "Beta", "Gamma"):
+        win.store.create_project(name)
+    dialog = CreateTaskDialog(win.store, win)
+    dialog.show()
+    spin()
+    return dialog
+
+
+def test_the_project_picker_opens_a_rounded_menu(win):
+    dialog = _task_dialog(win)
+    dialog.project_combo.showPopup()             # returns: popup(), not exec()
+    spin(40)
+    menu = dialog.project_combo.menu
+    assert menu.isVisible()
+    assert menu.testAttribute(Qt.WA_TranslucentBackground)
+    assert menu.windowFlags() & Qt.FramelessWindowHint
+    assert [a.text() for a in menu.actions()] == ["Alpha", "Beta", "Gamma"]
+    assert [a.isChecked() for a in menu.actions()] == [True, False, False]
+    menu.close()
+
+
+def test_choosing_from_the_project_menu_sets_the_project(win):
+    dialog = _task_dialog(win)
+    dialog.project_combo.showPopup()
+    _action(dialog.project_combo.menu, "Gamma").trigger()
+    assert dialog.project_combo.currentText() == "Gamma"
+
+
+def test_the_menu_tick_is_the_accent():
+    from simpletodo.ui.style import ACCENT, TICK_URL
+
+    from pathlib import Path
+
+    assert ACCENT.lower() in Path(TICK_URL).read_text().lower()
+
+
+def test_the_date_field_shows_a_readable_date(win):
+    dialog = _task_dialog(win)
+    dialog.date_edit.setDate(QDate(2026, 10, 29))
+    assert dialog.date_edit.text() == "Thu 29 Oct 2026"
+
+
+def test_the_date_popup_is_rounded_and_marks_today_and_the_choice(win):
+    dialog = _task_dialog(win)
+    chosen = QDate.currentDate().addDays(3)
+    dialog.date_edit.setDate(chosen)
+    popup = dialog.date_edit.open_popup()
+    spin()
+    assert popup.isVisible()
+    assert popup.testAttribute(Qt.WA_TranslucentBackground)
+    alphas, image = _corner_alphas(popup)
+    assert all(a == 0 for a in alphas), f"corners not cut away: {alphas}"
+
+    assert popup.cell_for(chosen).property("selected") is True
+    today = popup.cell_for(QDate.currentDate())
+    if today is not None:                  # today may sit on the previous page
+        assert today.property("today") is True
+    popup.close()
+
+
+def test_clicking_a_day_sets_the_date_and_closes(win):
+    dialog = _task_dialog(win)
+    popup = dialog.date_edit.open_popup()
+    spin()
+    from shiboken6 import isValid
+
+    target = popup.month.addDays(14)
+    popup.cell_for(target).click()
+    spin()
+    assert dialog.date_edit.date() == target
+    assert not isValid(popup), "the popup should close and delete itself"
+
+
+def test_quick_picks_choose_relative_days(win):
+    dialog = _task_dialog(win)
+    for label, days in (("Tomorrow", 1), ("Next week", 7), ("Today", 0)):
+        popup = dialog.date_edit.open_popup()
+        spin(20)
+        popup.quick_picks[label].click()
+        assert dialog.date_edit.date() == QDate.currentDate().addDays(days)
+
+
+def test_the_month_arrows_page_through_months(win):
+    dialog = _task_dialog(win)
+    dialog.date_edit.setDate(QDate(2026, 12, 15))
+    popup = dialog.date_edit.open_popup()
+    popup.next_button.click()
+    assert popup.title.text() == "January 2027"
+    popup.prev_button.click()
+    popup.prev_button.click()
+    assert popup.title.text() == "November 2026"
+    popup.close()
+
+
+def test_the_date_popup_works_from_the_keyboard(win):
+    from PySide6.QtTest import QTest
+
+    dialog = _task_dialog(win)
+    start = QDate(2026, 10, 29)
+    dialog.date_edit.setDate(start)
+    popup = dialog.date_edit.open_popup()
+    QTest.keyClick(popup, Qt.Key_Right)
+    QTest.keyClick(popup, Qt.Key_Down)
+    assert popup.cell_for(start.addDays(8)).property("keyed") is True
+    QTest.keyClick(popup, Qt.Key_Return)
+    assert dialog.date_edit.date() == start.addDays(8)
+
+    popup = dialog.date_edit.open_popup()
+    QTest.keyClick(popup, Qt.Key_PageDown)
+    assert popup.title.text() == "December 2026"
+    QTest.keyClick(popup, Qt.Key_Escape)
+    assert dialog.date_edit.date() == start.addDays(8)   # Esc changes nothing
+
+
+def test_the_due_and_project_fields_match(win):
+    dialog = _task_dialog(win)
+    assert dialog.date_edit.height() == dialog.project_combo.height()
+    assert dialog.date_edit.width() == dialog.project_combo.width()
+

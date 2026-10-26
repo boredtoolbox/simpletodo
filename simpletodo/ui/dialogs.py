@@ -4,11 +4,9 @@ from __future__ import annotations
 
 from datetime import date
 
-from PySide6.QtCore import QDate, Qt, Signal
+from PySide6.QtCore import Qt, Signal
 from PySide6.QtGui import QGuiApplication, QValidator
 from PySide6.QtWidgets import (
-    QComboBox,
-    QDateEdit,
     QDialog,
     QFrame,
     QGridLayout,
@@ -31,8 +29,8 @@ from ..validation import (
     validate_description,
     validate_name,
 )
-from .style import SPACE_1, SPACE_2, SPACE_3, SPACE_4, SPACE_6
-from .widgets import restyle
+from .style import FIELD_HEIGHT, SPACE_1, SPACE_2, SPACE_3, SPACE_4, SPACE_6
+from .widgets import DatePicker, MenuComboBox, restyle
 
 NAME_HINT = "Letters, digits, spaces and |"
 
@@ -285,17 +283,17 @@ class CreateTaskDialog(_BaseDialog):
         self.description_hint.setObjectName("hint")
 
         # -- due date
-        self.date_edit = QDateEdit()
-        self.date_edit.setCalendarPopup(True)
-        self.date_edit.setDisplayFormat("yyyy-MM-dd")
-        self.date_edit.setDate(QDate.currentDate())
+        self.date_edit = DatePicker()
 
         # -- project
-        self.project_combo = QComboBox()
+        self.project_combo = MenuComboBox()
         self._load_projects(preselect_project_id)
 
         self.add_field("Name", self.name_edit, self.name_hint)
         self.add_field("Description", self.description_edit, self.description_hint)
+        # A button and a combo box size themselves differently; pin both.
+        for picker in (self.date_edit, self.project_combo):
+            picker.setFixedHeight(FIELD_HEIGHT)
         self.add_field("Due", self.date_edit)
         self.add_field("Project", self.project_combo)
 

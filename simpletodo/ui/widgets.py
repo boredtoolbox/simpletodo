@@ -4,12 +4,22 @@ from __future__ import annotations
 
 from datetime import date
 
-from PySide6.QtCore import QEasingCurve, QPoint, QPropertyAnimation, Qt, Signal
+from PySide6.QtCore import (
+    QDate,
+    QEasingCurve,
+    QLocale,
+    QPoint,
+    QPropertyAnimation,
+    Qt,
+    Signal,
+)
 from PySide6.QtGui import QCursor, QIcon, QPainter, QPixmap
 from PySide6.QtSvg import QSvgRenderer
 from PySide6.QtWidgets import (
     QCheckBox,
+    QComboBox,
     QFrame,
+    QGridLayout,
     QHBoxLayout,
     QLabel,
     QMenu,
@@ -21,7 +31,16 @@ from PySide6.QtWidgets import (
 )
 
 from ..models import Task
-from .style import CHECKBOX_SIZE, ITEM_PADDING, SPACE_1, SPACE_2, SPACE_3, SPACE_4
+from .style import (
+    CHECKBOX_SIZE,
+    CHEVRON_URL,
+    DAY_CELL,
+    ITEM_PADDING,
+    SPACE_1,
+    SPACE_2,
+    SPACE_3,
+    SPACE_4,
+)
 
 MENU_GLYPH = "\u22ef"   # midline horizontal ellipsis
 
@@ -521,3 +540,289 @@ def restyle(widget: QWidget) -> None:
     """Re-apply the stylesheet after a dynamic property changed."""
     widget.style().unpolish(widget)
     widget.style().polish(widget)
+
+
+# -- pickers: pop-ups that look like the app's menus --------------------
+
+
+class MenuComboBox(QComboBox):
+    """A combo box whose list opens as one of the app's rounded menus.
+
+    Qt's own popup is a square list box; a Mac pop-up button shows a menu,
+    and this one matches the Move to submenu, with a tick on the current
+    choice. Opened with popup(), never exec(), like every menu here.
+    """
+
+    def __init__(self, parent: QWidget | None = None) -> None:
+        super().__init__(parent)
+        self.menu: QMenu | None = None
+
+    def showPopup(self):  # noqa: N802 - Qt naming
+        menu = rounded_menu(self)
+        menu.setAttribute(Qt.WA_DeleteOnClose)
+        menu.setMinimumWidth(self.width())
+        current = None
+        for index in range(self.count()):
+            action = menu.addAction(self.itemText(index))
+            action.setCheckable(True)
+            action.setChecked(index == self.currentIndex())
+            action.triggered.connect(lambda _=False, i=index: self.setCurrentIndex(i))
+            if index == self.currentIndex():
+                current = action
+        menu.popup(self.mapToGlobal(QPoint(0, self.height() + SPACE_1)))
+        if current is not None:
+            menu.setActiveAction(current)
+        self.menu = menu
+
+    def hidePopup(self):  # noqa: N802 - Qt naming
+        if self.menu is not None and self.menu.isVisible():
+            self.menu.close()
+
+
+#: How the due date reads in its field: short, with the weekday, since the
+#: weekday is what people plan by.
+DATE_FIELD_FORMAT = "ddd d MMM yyyy"
+
+
+class DatePicker(QPushButton):
+    """A date field that opens a DatePopup. Same API as QDateEdit's core.
+
+    QDateEdit's calendar popup is a grey, square, spreadsheet-like grid;
+    this shows the app's own rounded picker instead.
+    """
+
+    dateChanged = Signal(QDate)
+
+    def __init__(self, parent: QWidget | None = None) -> None:
+        super().__init__(parent)
+        self.setObjectName("dateField")
+        self._date = QDate.currentDate()
+        self.popup: DatePopup | None = None
+
+        # The chevron is a child so the text keeps the field's left edge.
+        chevron = QLabel()
+        chevron.setObjectName("fieldChevron")
+        chevron.setPixmap(QIcon(CHEVRON_URL).pixmap(10, 10))
+        chevron.setAttribute(Qt.WA_TransparentForMouseEvents, True)
+        row = QHBoxLayout(self)
+        row.setContentsMargins(0, 0, SPACE_2 + 1, 0)
+        row.addStretch(1)
+        row.addWidget(chevron)
+
+        self.clicked.connect(self.open_popup)
+        self._show_date()
+
+    def date(self) -> QDate:
+        return self._date
+
+    def setDate(self, value: QDate) -> None:  # noqa: N802 - mirrors QDateEdit
+        if value.isValid() and value != self._date:
+            self._date = value
+            self._show_date()
+            self.dateChanged.emit(value)
+
+    def _show_date(self) -> None:
+        self.setText(self._date.toString(DATE_FIELD_FORMAT))
+
+    def open_popup(self) -> "DatePopup":
+        popup = DatePopup(self._date, self)
+        popup.chosen.connect(self.setDate)
+        popup.show_below(self)
+        self.popup = popup
+        return popup
+
+    def keyPressEvent(self, event):  # noqa: N802 - Qt naming
+        # Alt+Down and F4 open a combo box; a date field should do the same.
+        if event.key() == Qt.Key_F4 or (
+            event.key() == Qt.Key_Down and event.modifiers() & Qt.AltModifier
+        ):
+            self.open_popup()
+            event.accept()
+            return
+        super().keyPressEvent(event)
+
+
+class _QuickPick(QPushButton):
+    """A menu-style row: a label on the left, a muted date on the right."""
+
+    def __init__(self, label: str, detail: str, parent: QWidget | None = None) -> None:
+        super().__init__(label, parent)
+        self.setObjectName("popupItem")
+        self.setFocusPolicy(Qt.NoFocus)
+        meta = QLabel(detail)
+        meta.setObjectName("popupItemMeta")
+        meta.setAttribute(Qt.WA_TransparentForMouseEvents, True)
+        row = QHBoxLayout(self)
+        row.setContentsMargins(0, 0, SPACE_4, 0)
+        row.addStretch(1)
+        row.addWidget(meta)
+
+
+class DatePopup(QWidget):
+    """A rounded month picker, styled like the app's menus.
+
+    Quick picks sit at the top as menu rows; below them a month grid with
+    round day cells. Arrows move a cursor, Page Up/Down change month, Return
+    picks, Esc closes. It is a Qt.Popup, so a click outside dismisses it.
+    """
+
+    chosen = Signal(QDate)
+
+    QUICK_PICKS = (("Today", 0), ("Tomorrow", 1), ("Next week", 7))
+
+    def __init__(self, selected: QDate, parent: QWidget | None = None) -> None:
+        super().__init__(
+            parent, Qt.Popup | Qt.FramelessWindowHint | Qt.NoDropShadowWindowHint
+        )
+        # Rounded only because the window itself is see-through; the same
+        # reason rounded_menu() does this.
+        self.setAttribute(Qt.WA_TranslucentBackground)
+        self.setAttribute(Qt.WA_DeleteOnClose)
+        self.setObjectName("datePopup")
+        self.setFocusPolicy(Qt.StrongFocus)
+
+        self.selected = selected
+        self.cursor = selected
+        self.month = QDate(selected.year(), selected.month(), 1)
+        today = QDate.currentDate()
+
+        panel = QFrame()
+        panel.setObjectName("popupPanel")
+        body = QVBoxLayout(panel)
+        body.setContentsMargins(SPACE_1, SPACE_1, SPACE_1, SPACE_2)
+        body.setSpacing(0)
+
+        self.quick_picks: dict[str, QPushButton] = {}
+        for label, days in self.QUICK_PICKS:
+            day = today.addDays(days)
+            button = _QuickPick(label, day.toString("ddd d MMM"))
+            button.clicked.connect(lambda _=False, d=day: self.choose(d))
+            self.quick_picks[label] = button
+            body.addWidget(button)
+
+        divider = QFrame()
+        divider.setObjectName("popupDivider")
+        divider.setFixedHeight(1)
+        body.addSpacing(SPACE_1)
+        body.addWidget(divider)
+        body.addSpacing(SPACE_2)
+
+        self.title = QLabel()
+        self.title.setObjectName("calTitle")
+        self.prev_button = self._nav("‹", "Previous month", -1)
+        self.next_button = self._nav("›", "Next month", 1)
+        header = QHBoxLayout()
+        header.setContentsMargins(SPACE_3, 0, SPACE_1, SPACE_1)
+        header.addWidget(self.title, 1)
+        header.addWidget(self.prev_button)
+        header.addWidget(self.next_button)
+        body.addLayout(header)
+
+        grid = QGridLayout()
+        grid.setContentsMargins(SPACE_2, 0, SPACE_2, 0)
+        grid.setHorizontalSpacing(2)
+        grid.setVerticalSpacing(2)
+        first = QLocale().firstDayOfWeek().value       # 1 = Monday ... 7 = Sunday
+        self._weekdays = [((first - 1 + i) % 7) + 1 for i in range(7)]
+        for column, weekday in enumerate(self._weekdays):
+            name = QLocale().dayName(weekday, QLocale.NarrowFormat)
+            label = QLabel(name)
+            label.setObjectName("calWeekday")
+            label.setAlignment(Qt.AlignCenter)
+            grid.addWidget(label, 0, column)
+        self.cells: list[QPushButton] = []
+        for index in range(42):
+            cell = QPushButton()
+            cell.setObjectName("calDay")
+            cell.setFixedSize(DAY_CELL, DAY_CELL)
+            cell.setFocusPolicy(Qt.NoFocus)
+            cell.clicked.connect(lambda _=False, i=index: self.choose(self._cell_dates[i]))
+            self.cells.append(cell)
+            grid.addWidget(cell, 1 + index // 7, index % 7)
+        body.addLayout(grid)
+
+        outer = QVBoxLayout(self)
+        outer.setContentsMargins(0, 0, 0, 0)
+        outer.addWidget(panel)
+
+        self._cell_dates: list[QDate] = []
+        self._today = today
+        self._refresh()
+
+    def _nav(self, glyph: str, tip: str, step: int) -> QPushButton:
+        button = QPushButton(glyph)
+        button.setObjectName("calNav")
+        button.setFixedSize(DAY_CELL - 4, DAY_CELL - 4)
+        button.setToolTip(tip)
+        button.setFocusPolicy(Qt.NoFocus)
+        button.clicked.connect(lambda: self.show_month(self.month.addMonths(step)))
+        return button
+
+    # -- showing --------------------------------------------------------
+
+    def show_below(self, anchor: QWidget) -> None:
+        """Open under *anchor*, or above it when there is no room below."""
+        self.adjustSize()
+        below = anchor.mapToGlobal(QPoint(0, anchor.height() + SPACE_1))
+        screen = anchor.screen().availableGeometry()
+        if below.y() + self.height() > screen.bottom():
+            below = anchor.mapToGlobal(QPoint(0, -self.height() - SPACE_1))
+        self.move(below)
+        self.show()
+        self.setFocus(Qt.PopupFocusReason)
+
+    def show_month(self, month: QDate) -> None:
+        self.month = QDate(month.year(), month.month(), 1)
+        if (self.cursor.year(), self.cursor.month()) != (month.year(), month.month()):
+            self.cursor = self.month.addDays(min(self.cursor.day(), self.month.daysInMonth()) - 1)
+        self._refresh()
+
+    def _refresh(self) -> None:
+        self.title.setText(self.month.toString("MMMM yyyy"))
+        lead = self._weekdays.index(self.month.dayOfWeek())
+        start = self.month.addDays(-lead)
+        self._cell_dates = [start.addDays(i) for i in range(42)]
+        for cell, day in zip(self.cells, self._cell_dates):
+            cell.setText(str(day.day()))
+            cell.setProperty("outside", day.month() != self.month.month())
+            cell.setProperty("today", day == self._today)
+            # Not "cursor": that name is QWidget's own mouse-cursor property.
+            cell.setProperty("keyed", day == self.cursor)
+            cell.setProperty("selected", day == self.selected)
+            cell.setAccessibleName(day.toString("dddd d MMMM yyyy"))
+            restyle(cell)
+
+    def cell_for(self, day: QDate) -> QPushButton | None:
+        """The cell showing *day*, if it is on the page."""
+        if day in self._cell_dates:
+            return self.cells[self._cell_dates.index(day)]
+        return None
+
+    # -- choosing -------------------------------------------------------
+
+    def choose(self, day: QDate) -> None:
+        self.chosen.emit(day)
+        self.close()
+
+    def keyPressEvent(self, event):  # noqa: N802 - Qt naming
+        steps = {Qt.Key_Left: -1, Qt.Key_Right: 1, Qt.Key_Up: -7, Qt.Key_Down: 7}
+        key = event.key()
+        if key in steps:
+            self._move_cursor(self.cursor.addDays(steps[key]))
+        elif key == Qt.Key_PageUp:
+            self._move_cursor(self.cursor.addMonths(-1))
+        elif key == Qt.Key_PageDown:
+            self._move_cursor(self.cursor.addMonths(1))
+        elif key in (Qt.Key_Return, Qt.Key_Enter, Qt.Key_Space):
+            self.choose(self.cursor)
+        elif key == Qt.Key_Escape:
+            self.close()
+        else:
+            super().keyPressEvent(event)
+            return
+        event.accept()
+
+    def _move_cursor(self, day: QDate) -> None:
+        self.cursor = day
+        self.month = QDate(day.year(), day.month(), 1)
+        self._refresh()

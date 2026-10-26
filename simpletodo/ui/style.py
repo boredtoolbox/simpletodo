@@ -14,6 +14,9 @@ from pathlib import Path
 _ASSETS = Path(__file__).resolve().parent / "assets"
 CHECK_URL = _ASSETS.joinpath("check.svg").as_posix()
 CHEVRON_URL = _ASSETS.joinpath("chevron.svg").as_posix()
+#: The accent tick beside the current choice in a pop-up menu. Its colour is
+#: ACCENT, written into the file; test_the_menu_tick_is_the_accent pins them.
+TICK_URL = _ASSETS.joinpath("tick.svg").as_posix()
 FONTS_DIR = _ASSETS / "fonts"
 
 # -- colour -------------------------------------------------------------
@@ -69,6 +72,12 @@ ITEM_RADIUS = 8            # sidebar selection, task hover
 #: Height of the round top-bar buttons and the search pill.
 TOOL_SIZE = 28
 SEARCH_WIDTH = 200
+
+#: Height of the pop-up fields (Due, Project), so the two always match.
+FIELD_HEIGHT = 32
+
+#: Side of a day in the date picker's month grid.
+DAY_CELL = 30
 
 #: Side of the round checkbox. Shared so the description below a task can
 #: line up with the task name rather than with the checkbox.
@@ -435,7 +444,7 @@ QFrame#dialogDivider {{
 
 /* A focused field wears a thick, soft accent ring. The 2px the ring adds
    comes out of the padding, so the text does not move when focus arrives. */
-QLineEdit, QTextEdit, QDateEdit, QComboBox {{
+QLineEdit, QTextEdit, QComboBox, QPushButton#dateField {{
     background: {SURFACE};
     border: 1px solid {LINE};
     border-radius: 7px;
@@ -445,30 +454,97 @@ QLineEdit, QTextEdit, QDateEdit, QComboBox {{
     selection-background-color: {ACCENT_WASH};
     selection-color: {INK};
 }}
-QLineEdit:focus, QTextEdit:focus, QDateEdit:focus, QComboBox:focus {{
+QLineEdit:focus, QTextEdit:focus, QComboBox:focus, QPushButton#dateField:focus {{
     border: 3px solid {ACCENT_RING};
     padding: {SPACE_1}px {SPACE_2}px;
 }}
 QLineEdit::placeholder {{ color: {INK_FAINT}; }}
 /* Fusion boxes the drop-down arrow in a hard-edged button; a bare chevron
    is all a Mac pop-up shows. */
-QComboBox::drop-down, QDateEdit::drop-down {{
+QComboBox::drop-down {{
     subcontrol-origin: padding;
     subcontrol-position: center right;
     border: none;
     width: {SPACE_6}px;
 }}
-QComboBox::down-arrow, QDateEdit::down-arrow {{
+QComboBox::down-arrow {{
     image: url("{CHEVRON_URL}");
     width: 10px;
     height: 10px;
 }}
-QComboBox QAbstractItemView {{
+QPushButton#dateField {{ text-align: left; }}
+QLabel#fieldChevron {{ background: transparent; }}
+
+/* ---- pickers: the date pop-up shares the menus' look ---- */
+QMenu::indicator {{
+    width: 14px;
+    height: 14px;
+    padding-left: {SPACE_1}px;
+}}
+QMenu::indicator:checked {{ image: url("{TICK_URL}"); }}
+QMenu::indicator:unchecked {{ image: none; }}
+
+QWidget#datePopup {{ background: transparent; }}
+QFrame#popupPanel {{
     background: {SURFACE};
     border: 1px solid {LINE};
-    selection-background-color: {HOVER};
-    selection-color: {INK};
-    outline: none;
+    border-radius: {MENU_RADIUS}px;
+}}
+QFrame#popupDivider {{
+    background: {LINE};
+    border: none;
+    margin: 0 {SPACE_2}px;
+}}
+QPushButton#popupItem {{
+    background: transparent;
+    border: none;
+    border-radius: {MENU_ITEM_RADIUS}px;
+    padding: {SPACE_2}px {SPACE_4}px;
+    margin: 0 {SPACE_1}px;
+    color: {INK};
+    text-align: left;
+}}
+QPushButton#popupItem:hover {{ background: {HOVER}; }}
+QLabel#popupItemMeta {{
+    color: {INK_SOFT};
+    font-size: {TEXT_META}px;
+    background: transparent;
+}}
+QLabel#calTitle {{
+    color: {INK};
+    font-weight: 600;
+    background: transparent;
+}}
+QPushButton#calNav {{
+    background: transparent;
+    border: none;
+    border-radius: {(DAY_CELL - 4) // 2}px;
+    color: {INK_SOFT};
+    font-size: 17px;
+    padding: 0 0 2px 0;
+}}
+QPushButton#calNav:hover {{ background: {HOVER}; color: {INK}; }}
+QLabel#calWeekday {{
+    color: {INK_FAINT};
+    font-size: 11px;
+    font-weight: 500;
+    background: transparent;
+}}
+QPushButton#calDay {{
+    background: transparent;
+    border: none;
+    border-radius: {DAY_CELL // 2}px;
+    color: {INK};
+    font-size: {TEXT_META}px;
+}}
+QPushButton#calDay:hover {{ background: {HOVER}; }}
+QPushButton#calDay[outside="true"] {{ color: {INK_FAINT}; }}
+QPushButton#calDay[today="true"] {{ color: {ACCENT}; font-weight: 700; }}
+QPushButton#calDay[keyed="true"] {{ background: {HOVER}; }}
+QPushButton#calDay[selected="true"] {{
+    background: {ACCENT};
+    color: #FFFFFF;
+    font-weight: 600;
 }}
 
 QPushButton#primary {{
