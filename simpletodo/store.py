@@ -20,9 +20,9 @@ from .models import Project, Task
 class TodoStore(QObject):
     """Single source of truth, and the only thing the views mutate."""
 
-    #: Projects or tasks were added, removed, renamed or archived. Views
-    #: rebuild. One signal, not one per table: every view shows both, so two
-    #: signals meant every view rebuilt twice per change.
+    #: Projects or tasks were added, removed, renamed, moved, pinned or
+    #: archived. Views rebuild. One signal, not one per table: every view
+    #: shows both, so two signals meant every view rebuilt twice per change.
     changed = Signal()
     #: A task was ticked or unticked. Nothing appears or disappears, so views
     #: update the rows in place -- rebuilding them all made the tick lag.
@@ -46,6 +46,12 @@ class TodoStore(QObject):
     def tasks_for_project(self, project_id: int) -> list[Task]:
         return self._guard(lambda: self._db.tasks_for_project(project_id), default=[])
 
+    def loose_tasks(self) -> list[Task]:
+        return self._guard(self._db.loose_tasks, default=[])
+
+    def pinned_tasks(self) -> list[Task]:
+        return self._guard(self._db.pinned_tasks, default=[])
+
     def tasks_in_bucket(
         self, bucket: Bucket, *, include_completed: bool = True
     ) -> list[Task]:
@@ -62,8 +68,8 @@ class TodoStore(QObject):
     def archived_count(self) -> int:
         return self._guard(self._db.archived_count, default=0)
 
-    def last_task_project_id(self) -> int | None:
-        return self._guard(self._db.last_task_project_id, default=None)
+    def newest_task(self) -> Task | None:
+        return self._guard(self._db.newest_task, default=None)
 
     def project_exists(self, name: str, exclude_id: int | None = None) -> bool:
         return self._guard(
@@ -79,7 +85,7 @@ class TodoStore(QObject):
         return project
 
     def create_task(
-        self, name: str, due_date: str, project_id: int, description: str = ""
+        self, name: str, due_date: str, project_id: int | None, description: str = ""
     ) -> Task | None:
         task = self._guard(
             lambda: self._db.add_task(name, due_date, project_id, description),
@@ -105,7 +111,18 @@ class TodoStore(QObject):
             self.changed.emit()
         return bool(ok)
 
-    def move_task(self, task_id: int, project_id: int) -> bool:
+    def set_task_pinned(self, task_id: int, pinned: bool) -> bool:
+        # A rebuild, not an in-place update: the task changes place in its
+        # list and the Pinned entry may appear or go.
+        ok = self._guard(
+            lambda: (self._db.set_task_pinned(task_id, pinned), True)[1],
+            default=False,
+        )
+        if ok:
+            self.changed.emit()
+        return bool(ok)
+
+    def move_task(self, task_id: int, project_id: int | None) -> bool:
         ok = self._guard(
             lambda: (self._db.move_task(task_id, project_id), True)[1], default=False
         )

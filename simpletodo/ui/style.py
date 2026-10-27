@@ -2,7 +2,7 @@
 
 Modelled on the Apple Notes window: a white ground, a sidebar list whose
 selection is a soft grey rounded slab, hairline dividers, a top bar of round
-buttons and a search pill, round checkboxes. The greys were sampled from Notes
+buttons and a search pill, rounded-square checkboxes. The greys were sampled from Notes
 screenshots; the accent is the blue of the app icon, not Notes' yellow.
 """
 
@@ -73,15 +73,21 @@ ITEM_RADIUS = 8            # sidebar selection, task hover
 TOOL_SIZE = 28
 SEARCH_WIDTH = 200
 
+#: Extra room above the top-bar buttons. A bar only as tall as the macOS
+#: title bar left them 2pt from the window's top edge.
+TOP_BAR_INSET = SPACE_2
+
 #: Height of the pop-up fields (Due, Project), so the two always match.
 FIELD_HEIGHT = 32
 
 #: Side of a day in the date picker's month grid.
 DAY_CELL = 30
 
-#: Side of the round checkbox. Shared so the description below a task can
+#: Side of the checkbox. Shared so the description below a task can
 #: line up with the task name rather than with the checkbox.
 CHECKBOX_SIZE = 20
+#: Corner radius of the checkbox: a rounded square, not a circle.
+CHECKBOX_RADIUS = 5
 
 TEXT_TITLE = 24              # the pane heading
 TEXT_MASTHEAD = 18           # "Simple To Do", atop the sidebar
@@ -90,8 +96,9 @@ TEXT_BODY = 13               # sidebar items, inputs, buttons
 TEXT_META = 12               # counts, dates, hints
 
 
-#: Top-bar glyphs, drawn as line art in the ink they are given. Kept here, not
-#: in assets/, because their colour comes from the tokens above.
+#: Top-bar glyphs and the pin mark, drawn as line art in the ink they are
+#: given. Kept here, not in assets/, because their colour comes from the
+#: tokens above.
 _ICONS = {
     # a square with a pencil across its corner: write a new task
     "compose": """
@@ -105,6 +112,10 @@ _ICONS = {
     "search": """
       <circle cx="8.5" cy="8.5" r="5"/>
       <path d="M12.3 12.3 L16.5 16.5"/>""",
+    # a push pin, head up: marks a pinned task
+    "pin": """
+      <path d="M7 2.5 H13 L12 8 L15 11.5 H5 L8 8 Z" fill="{ink}"/>
+      <path d="M10 11.5 V17.5"/>""",
 }
 
 _ICON_SVG = """\
@@ -190,7 +201,7 @@ QLineEdit#searchField:focus {{ border-color: {ACCENT_RING}; }}
 QLabel#appTitle {{
     font-size: {TEXT_MASTHEAD}px;
     font-weight: 700;
-    color: {INK};
+    color: {ACCENT};
     background: transparent;
 }}
 
@@ -214,18 +225,16 @@ QWidget#segmentBar {{
 }}
 QPushButton#segment {{
     background: transparent;
-    color: {INK_SOFT};
     border: 1px solid transparent;
     border-radius: 6px;
     padding: {SPACE_1}px {SPACE_2}px;
     font-size: {TEXT_META}px;
     font-weight: 500;
+    color: {ACCENT};
 }}
-QPushButton#segment:hover {{ color: {INK}; }}
 QPushButton#segment:checked {{
     background: {SURFACE};
     border-color: {LINE};
-    color: {INK};
     font-weight: 600;
 }}
 
@@ -306,6 +315,7 @@ QLabel#taskName[done="true"] {{
     color: {INK_FAINT};
     text-decoration: line-through;
 }}
+QLabel#pinMark {{ background: transparent; }}
 /* Only a task that has something to show invites a click. */
 QLabel#taskName[expandable="true"]:hover {{
     color: {INK_SOFT};
@@ -326,7 +336,7 @@ QCheckBox#taskCheck::indicator {{
     width: {CHECKBOX_SIZE - 2}px;
     height: {CHECKBOX_SIZE - 2}px;
     border: 1px solid {RING};
-    border-radius: {CHECKBOX_SIZE // 2}px;
+    border-radius: {CHECKBOX_RADIUS}px;
     background: {SURFACE};
 }}
 QCheckBox#taskCheck::indicator:hover {{

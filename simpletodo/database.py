@@ -14,6 +14,28 @@ from .models import Project, Task, now_iso
 
 log = logging.getLogger(__name__)
 
+_TASKS_TABLE = """
+CREATE TABLE {name} (
+    id            INTEGER PRIMARY KEY AUTOINCREMENT,
+    name          TEXT    NOT NULL,
+    description   TEXT    NOT NULL DEFAULT '',
+    due_date      TEXT    NOT NULL,
+    project_id    INTEGER REFERENCES projects(id) ON DELETE CASCADE,
+    is_completed  INTEGER NOT NULL DEFAULT 0,
+    creation_date TEXT    NOT NULL,
+    is_pinned     INTEGER NOT NULL DEFAULT 0
+);
+"""
+
+_TASK_INDEXES = """
+CREATE INDEX IF NOT EXISTS idx_tasks_project ON tasks(project_id);
+CREATE INDEX IF NOT EXISTS idx_tasks_due     ON tasks(due_date);
+"""
+
+#: Stored in PRAGMA user_version. 0 is the original schema, in which every
+#: task had to belong to a project and none could be pinned.
+SCHEMA_VERSION = 1
+
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS projects (
     id            INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -21,20 +43,26 @@ CREATE TABLE IF NOT EXISTS projects (
     creation_date TEXT    NOT NULL,
     is_active     INTEGER NOT NULL DEFAULT 1
 );
-
-CREATE TABLE IF NOT EXISTS tasks (
-    id            INTEGER PRIMARY KEY AUTOINCREMENT,
-    name          TEXT    NOT NULL,
-    description   TEXT    NOT NULL DEFAULT '',
-    due_date      TEXT    NOT NULL,
-    project_id    INTEGER NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
-    is_completed  INTEGER NOT NULL DEFAULT 0,
-    creation_date TEXT    NOT NULL
-);
-
-CREATE INDEX IF NOT EXISTS idx_tasks_project ON tasks(project_id);
-CREATE INDEX IF NOT EXISTS idx_tasks_due     ON tasks(due_date);
+""" + _TASKS_TABLE.format(name="tasks") + _TASK_INDEXES + f"""
+PRAGMA user_version = {SCHEMA_VERSION};
 """
+
+#: Version 0 -> 1. SQLite cannot drop a NOT NULL constraint in place, so the
+#: tasks table is rebuilt and the rows copied across, in one transaction.
+_UPGRADE_TO_1 = (
+    "BEGIN;\n"
+    + _TASKS_TABLE.format(name="tasks_upgrade")
+    + """
+INSERT INTO tasks_upgrade
+    (id, name, description, due_date, project_id, is_completed, creation_date)
+SELECT id, name, description, due_date, project_id, is_completed, creation_date
+FROM tasks;
+DROP TABLE tasks;
+ALTER TABLE tasks_upgrade RENAME TO tasks;
+"""
+    + _TASK_INDEXES
+    + "PRAGMA user_version = 1;\nCOMMIT;\n"
+)
 
 
 #: Phrases SQLite uses when a file is genuinely not a usable database. Anything
@@ -46,6 +74,11 @@ _CORRUPTION_MARKERS = (
     "file is encrypted",
     "unsupported file format",
 )
+
+
+#: A task outside the archive: in a live project, or in none. For queries
+#: that LEFT JOIN tasks t to projects p.
+_LIVE = "(t.project_id IS NULL OR p.is_active = 1)"
 
 
 def _is_corruption(exc: BaseException) -> bool:
@@ -103,10 +136,38 @@ class Database:
         conn.row_factory = sqlite3.Row
         # Read the header first: a corrupt file raises here, before any write.
         conn.execute("PRAGMA quick_check").fetchone()
-        conn.execute("PRAGMA foreign_keys = ON")
         if not self._schema_present(conn):
             conn.executescript(SCHEMA)
+        else:
+            self._upgrade(conn)
+        # After any upgrade: rebuilding the tasks table drops and recreates
+        # it, which enforced foreign keys would complicate for no benefit.
+        conn.execute("PRAGMA foreign_keys = ON")
         self._conn = conn
+
+    def _upgrade(self, conn: sqlite3.Connection) -> None:
+        """Bring an older database up to SCHEMA_VERSION.
+
+        Reading the version is safe anywhere; only an old database is written
+        to. One that cannot be written (a read-only folder) fails here with
+        guidance rather than opening with columns the app expects missing.
+        """
+        version = conn.execute("PRAGMA user_version").fetchone()[0]
+        if version >= SCHEMA_VERSION:
+            return
+        try:
+            conn.executescript(_UPGRADE_TO_1)
+        except sqlite3.Error as exc:
+            if conn.in_transaction:
+                conn.execute("ROLLBACK")
+            if _is_corruption(exc):
+                raise
+            raise DatabaseError(
+                f"The database at {self.path} needs a one-time upgrade for "
+                f"this version of SimpleTodo, and it could not be written.\n\n"
+                f"{exc}\n\nCheck that you have permission to write to that "
+                "folder. Nothing was changed."
+            ) from exc
 
     @staticmethod
     def _schema_present(conn: sqlite3.Connection) -> bool:
@@ -229,7 +290,7 @@ class Database:
         self,
         name: str,
         due_date: str,
-        project_id: int,
+        project_id: int | None,
         description: str = "",
     ) -> Task:
         task = Task(
@@ -257,40 +318,42 @@ class Database:
         task.id = cur.lastrowid
         return task
 
-    def last_task_project_id(self) -> int | None:
-        """The project the most recently created task was filed under.
+    def newest_task(self) -> Task | None:
+        """The most recently created task.
 
-        This is what the Create Task dialog offers first: someone adding a
-        run of tasks to one project should not have to pick it every time.
-        Read from the tasks themselves, so it survives a restart with no
-        extra table.
+        Its project -- or its lack of one -- is what the Create Task dialog
+        offers first: someone adding a run of tasks to one project should not
+        have to pick it every time. Read from the tasks themselves, so it
+        survives a restart with no extra table.
         """
-        row = self._read(
-            "SELECT project_id FROM tasks ORDER BY id DESC LIMIT 1"
-        ).fetchone()
-        return row["project_id"] if row else None
+        row = self._read("SELECT * FROM tasks ORDER BY id DESC LIMIT 1").fetchone()
+        return self._to_task(row) if row else None
 
     def tasks_for_project(self, project_id: int) -> list[Task]:
-        rows = self._read(
-            """
-            SELECT t.*, p.name AS project_name
-            FROM tasks t JOIN projects p ON p.id = t.project_id
-            WHERE t.project_id = ?
-            ORDER BY t.is_completed, t.due_date, t.id
-            """,
-            (project_id,),
-        ).fetchall()
-        return [self._to_task(r) for r in rows]
+        return self._tasks_where("t.project_id = ?", (project_id,))
+
+    def loose_tasks(self) -> list[Task]:
+        """Tasks that belong to no project: the Inbox."""
+        return self._tasks_where("t.project_id IS NULL")
+
+    def pinned_tasks(self) -> list[Task]:
+        """Pinned tasks outside the archive, from every project and none."""
+        return self._tasks_where(f"t.is_pinned = 1 AND {_LIVE}")
 
     def all_tasks(self) -> list[Task]:
-        """Every task in a live project. Archived work is out of the schedule."""
+        """Every live task. Archived work is out of the schedule."""
+        return self._tasks_where(_LIVE)
+
+    def _tasks_where(self, condition: str, params: tuple = ()) -> list[Task]:
+        """Tasks matching *condition*: pinned first, then by date, done last."""
         rows = self._read(
-            """
+            f"""
             SELECT t.*, p.name AS project_name
-            FROM tasks t JOIN projects p ON p.id = t.project_id
-            WHERE p.is_active = 1
-            ORDER BY t.due_date, t.id
-            """
+            FROM tasks t LEFT JOIN projects p ON p.id = t.project_id
+            WHERE {condition}
+            ORDER BY t.is_completed, t.is_pinned DESC, t.due_date, t.id
+            """,
+            params,
         ).fetchall()
         return [self._to_task(r) for r in rows]
 
@@ -309,7 +372,9 @@ class Database:
             if bucket_matches(t.due, bucket, today)
             and (include_completed or not t.is_completed)
         ]
-        selected.sort(key=lambda t: (t.is_completed, t.due, t.name.lower()))
+        selected.sort(
+            key=lambda t: (t.is_completed, not t.is_pinned, t.due, t.name.lower())
+        )
         return selected
 
     def set_task_completed(self, task_id: int, completed: bool) -> None:
@@ -321,7 +386,12 @@ class Database:
     def rename_task(self, task_id: int, name: str) -> None:
         self._write("UPDATE tasks SET name = ? WHERE id = ?", (name.strip(), task_id))
 
-    def move_task(self, task_id: int, project_id: int) -> None:
+    def set_task_pinned(self, task_id: int, pinned: bool) -> None:
+        self._write(
+            "UPDATE tasks SET is_pinned = ? WHERE id = ?", (int(pinned), task_id)
+        )
+
+    def move_task(self, task_id: int, project_id: int | None) -> None:
         self._write(
             "UPDATE tasks SET project_id = ? WHERE id = ?", (project_id, task_id)
         )
@@ -330,14 +400,14 @@ class Database:
         self._write("DELETE FROM tasks WHERE id = ?", (task_id,))
 
     def counts(self) -> tuple[int, int, int]:
-        """(projects, tasks, completed tasks) across live projects."""
+        """(projects, tasks, completed tasks) outside the archive."""
         row = self._read(
-            """
+            f"""
             SELECT (SELECT COUNT(*) FROM projects WHERE is_active = 1) AS projects,
                    COUNT(t.id)                                         AS tasks,
                    COALESCE(SUM(t.is_completed), 0)                    AS done
-            FROM tasks t JOIN projects p ON p.id = t.project_id
-            WHERE p.is_active = 1
+            FROM tasks t LEFT JOIN projects p ON p.id = t.project_id
+            WHERE {_LIVE}
             """
         ).fetchone()
         return row["projects"], row["tasks"], row["done"]
@@ -357,8 +427,11 @@ class Database:
             due_date=row["due_date"],
             project_id=row["project_id"],
             is_completed=bool(row["is_completed"]),
+            is_pinned=bool(row["is_pinned"]),
             creation_date=row["creation_date"],
-            project_name=row["project_name"] if "project_name" in row.keys() else "",
+            project_name=(
+                (row["project_name"] or "") if "project_name" in row.keys() else ""
+            ),
         )
 
     def _read(self, sql: str, params: tuple = ()) -> sqlite3.Cursor:

@@ -62,13 +62,18 @@ first time you open it, right-click it and choose **Open**.
 - The switch under the title picks what the sidebar lists. **Projects** lists
   your projects; select one to see its tasks on the right. Tick a checkbox to
   complete a task, and click a task's name to read its description.
+- A task doesn't need a project: choose **Inbox** as its project and it is
+  listed under **Inbox** at the top of the sidebar.
+- **Pin** a task from its **⋯** menu to keep it in view. Pinned tasks are
+  gathered under **Pinned** at the top of the sidebar, which is where the app
+  opens, and they come first in their own project too.
 - **Date** lists Today, Tomorrow, This Week and Rest. Overdue tasks show up in
   Today, in red.
 - **Archive** lists archived projects, where you can restore them. Esc goes
   back to the view you came from.
 - Hover a project or task and click **⋯** (or right-click it) to rename,
   delete or archive it. A task's menu also has **Move to**, to send it to a
-  different project. The arrow keys move through the sidebar.
+  different project or to the Inbox. The arrow keys move through the sidebar.
 
 ## Your data
 
@@ -80,6 +85,8 @@ first time you open it, right-click it and choose **Open**.
 To store it somewhere else, set `SIMPLETODO_DATA_DIR`. Every change is saved
 immediately. If the file is ever damaged, the app keeps a backup copy
 (`todo.sqlite3.corrupt-<timestamp>`) and starts a fresh database.
+A database from an earlier version is upgraded once, the first time a newer
+version opens it; its folder must be writable for that.
 
 ## Development
 

@@ -9,8 +9,8 @@ from simpletodo.dates import Bucket
 from simpletodo.store import TodoStore
 from simpletodo.ui.dialogs import CreateProjectDialog, CreateTaskDialog
 from simpletodo.ui.main_window import MainWindow
-from simpletodo.ui.style import stylesheet
-from simpletodo.ui.views import Mode
+from simpletodo.ui.style import TOP_BAR_INSET, stylesheet
+from simpletodo.ui.views import Mode, Shelf
 from simpletodo.ui.widgets import TaskRow
 
 
@@ -127,12 +127,12 @@ def test_names_with_spaces_round_trip(win):
     assert dialog.result() == 1
     assert [p.name for p in win.store.projects()] == ["Home Chores"]
 
-    task_dialog = CreateTaskDialog(win.store, win)
+    project = win.store.projects()[0]
+    task_dialog = CreateTaskDialog(win.store, win, preselect_project_id=project.id)
     task_dialog.name_edit.setText("Wash the dishes")
     assert task_dialog.create_button.isEnabled()
     task_dialog._on_create()
     assert task_dialog.result() == 1
-    project = win.store.projects()[0]
     assert win.store.tasks_for_project(project.id)[0].name == "Wash the dishes"
 
 
@@ -205,11 +205,15 @@ def test_task_dialog_counts_words_live_and_caps_at_300(win):
     assert not dialog.create_button.isEnabled()
 
 
-def test_task_dialog_without_projects_cannot_create(win):
+def test_a_task_needs_no_project(win):
     dialog = CreateTaskDialog(win.store, win)
-    assert not dialog.project_combo.isEnabled()
-    assert dialog.project_combo.currentData() is None
-    assert not dialog.create_button.isEnabled()
+    assert dialog.project_combo.currentText() == "Inbox"
+    dialog.name_edit.setText("Call the bank")
+    assert dialog.create_button.isEnabled()
+    dialog._on_create()
+    assert dialog.result() == 1
+    [task] = win.store.loose_tasks()
+    assert (task.name, task.project_id) == ("Call the bank", None)
 
 
 # -- projects view ------------------------------------------------------
@@ -840,7 +844,9 @@ def test_rows_and_project_items_carry_a_menu_button(win):
 def test_task_menu_offers_rename_and_delete(win):
     seed(win)
     menu = win.browser._task_menu(rows(win)[0].task, QPoint(0, 0))
-    assert [a.text() for a in menu.actions()] == ["Rename…", "Move to", "Delete task"]
+    assert [a.text() for a in menu.actions()] == [
+        "Pin", "Rename…", "Move to", "Delete task"
+    ]
     menu.close()
 
 
@@ -1078,10 +1084,10 @@ def test_the_ground_is_white_like_notes():
     assert SURFACE.upper() == "#FFFFFF"
 
 
-# -- round checkboxes ---------------------------------------------------
+# -- checkboxes ---------------------------------------------------------
 
 
-def test_the_checkbox_is_round_and_fills_with_the_accent(win):
+def test_the_checkbox_is_a_rounded_square_that_fills_with_the_accent(win):
     from PySide6.QtGui import QColor
 
     from simpletodo.ui.style import ACCENT, CHECKBOX_SIZE
@@ -1098,9 +1104,10 @@ def test_the_checkbox_is_round_and_fills_with_the_accent(win):
     def at(x, y):
         return image.pixelColor(int(x * scale), int((top + y) * scale))
 
-    # The corner of the indicator's box is outside the circle; a point inside
-    # the ring, clear of the tick, is the accent.
-    assert at(1, 1).name() != QColor(ACCENT).name(), "the indicator is square"
+    # The very corner is rounded off, but a point just inside it, which a
+    # circle would leave out, is filled: a rounded square.
+    assert at(0.3, 0.3).name() != QColor(ACCENT).name(), "the corners are sharp"
+    assert at(2.5, 2.5).name() == QColor(ACCENT).name(), "the indicator is round"
     assert at(CHECKBOX_SIZE * 0.5, 3).name() == QColor(ACCENT).name()
 
 
@@ -1212,7 +1219,7 @@ def test_archived_projects_are_not_offered_for_new_tasks(win):
     _archive_first_project(win)          # "Garden" sorts first
     dialog = CreateTaskDialog(win.store, win)
     offered = [dialog.project_combo.itemText(i) for i in range(dialog.project_combo.count())]
-    assert offered == ["Home|Chores"]
+    assert offered == ["Inbox", "Home|Chores"]
 
 
 def test_the_archive_is_a_segment_beside_projects_and_date(win):
@@ -1305,6 +1312,14 @@ def test_both_halves_of_the_top_bar_share_one_height(win):
     assert win.sidebar_bar.height() == win.browser.top_bar.height() > 0
     top = win.browser.top_bar.mapTo(win, QPoint(0, 0)).y()
     assert top == win.sidebar_bar.mapTo(win, QPoint(0, 0)).y() == 0
+
+
+def test_the_top_bar_buttons_keep_clear_of_the_window_edge(win):
+    win._set_top_bar_height(32)                    # the macOS title bar's height
+    spin()
+    for button in (win.add_button, win.browser.compose_button,
+                   win.browser.more_button, win.browser.search_field):
+        assert button.mapTo(win, QPoint(0, 0)).y() >= TOP_BAR_INSET
 
 
 def test_the_new_task_button_files_under_the_selected_project(win, monkeypatch):
@@ -1441,14 +1456,15 @@ def test_dialogs_open_as_sheets_only_on_macos(win):
     assert is_sheet == (QGuiApplication.platformName() == "cocoa")
 
 
-def test_creating_a_task_with_no_projects_offers_a_project_first(win, monkeypatch):
+def test_a_task_created_with_no_projects_lands_in_the_inbox(win, monkeypatch):
     from simpletodo.ui import main_window
 
-    asked = []
-    monkeypatch.setattr(main_window, "confirm",
-                        lambda *a, **k: asked.append(k["confirm_text"]) or False)
+    monkeypatch.setattr(main_window, "CreateTaskDialog", _stand_in(
+        lambda: win.store.create_task("Call|Bank", "2030-01-01", None)))
     win.create_task()
-    assert asked == ["New Project"]
+    spin()
+    assert item(win, "Inbox").selected
+    assert [r.task.name for r in rows(win)] == ["Call|Bank"]
 
 
 # -- the task dialog remembers the last project -------------------------
@@ -1533,7 +1549,7 @@ def test_move_to_lists_every_other_live_project(win):
     choose(win, "Home|Chores")
 
     menu, move = _move_menu(win, rows(win)[0].task)
-    assert [a.text() for a in move.actions()] == ["Attic", "Garden"]
+    assert [a.text() for a in move.actions()] == ["Inbox", "Attic", "Garden"]
     assert move.testAttribute(Qt.WA_TranslucentBackground)      # rounded too
     menu.close()
 
@@ -1569,7 +1585,7 @@ def test_a_moved_task_keeps_its_state(win):
 
 
 def test_move_to_is_off_with_nowhere_to_go(win):
-    seed(win)
+    win.store.create_task("Loose", "2030-01-01", None)    # no projects to go to
     menu, move = _move_menu(win, rows(win)[0].task)
     assert not move.isEnabled() and move.actions() == []
     menu.close()
@@ -1607,8 +1623,8 @@ def test_the_project_picker_opens_a_rounded_menu(win):
     assert menu.isVisible()
     assert menu.testAttribute(Qt.WA_TranslucentBackground)
     assert menu.windowFlags() & Qt.FramelessWindowHint
-    assert [a.text() for a in menu.actions()] == ["Alpha", "Beta", "Gamma"]
-    assert [a.isChecked() for a in menu.actions()] == [True, False, False]
+    assert [a.text() for a in menu.actions()] == ["Inbox", "Alpha", "Beta", "Gamma"]
+    assert [a.isChecked() for a in menu.actions()] == [True, False, False, False]
     menu.close()
 
 
@@ -1710,3 +1726,101 @@ def test_the_due_and_project_fields_match(win):
     assert dialog.date_edit.height() == dialog.project_combo.height()
     assert dialog.date_edit.width() == dialog.project_combo.width()
 
+
+
+# -- pinned tasks and the inbox -----------------------------------------
+
+
+def _pin(win, name):
+    menu = win.browser._task_menu(row(win, name).task, QPoint(0, 0))
+    _action(menu, "Pin").trigger()
+    menu.close()
+    spin()
+
+
+def test_pinning_a_task_lists_it_under_pinned_at_the_top(win):
+    seed(win)
+    win.store.create_project("Garden")
+    assert "Pinned" not in details(win)              # no empty shelf
+    choose(win, "Home|Chores")
+    _pin(win, "Buy|Bread")
+
+    assert [i.title for i in items(win)][0] == "Pinned"
+    assert item(win, "Home|Chores").selected         # pinning does not navigate
+    assert rows(win)[0].task.name == "Buy|Bread"     # first in its project too
+    assert not row(win, "Buy|Bread").pin_mark.isHidden()
+    assert row(win, "Wash|Dishes").pin_mark.isHidden()
+
+    choose(win, "Pinned")
+    assert [r.task.name for r in rows(win)] == ["Buy|Bread"]
+    assert "Home|Chores" in rows(win)[0].meta_text   # where it is pinned from
+    assert not item(win, "Pinned").menu_button.isVisibleTo(item(win, "Pinned"))
+
+
+def test_unpinning_the_last_task_removes_the_shelf(win):
+    seed(win)
+    _pin(win, "Buy|Bread")
+    choose(win, "Pinned")
+    menu = win.browser._task_menu(rows(win)[0].task, QPoint(0, 0))
+    _action(menu, "Unpin").trigger()
+    menu.close()
+    spin()
+    assert "Pinned" not in details(win)
+    assert item(win, "Home|Chores").selected
+
+
+def test_the_window_opens_on_pinned_tasks(win):
+    seed(win)
+    win.store.create_project("Attic")                # sorts before Home|Chores
+    _pin(win, "Wash|Dishes")
+    reopened = MainWindow(win.store)
+    try:
+        assert reopened.browser.sidebar.selected_key is Shelf.PINNED
+        assert [r.task.name for r in reopened.browser.pane.rows] == ["Wash|Dishes"]
+    finally:
+        reopened.close()
+
+
+def test_loose_tasks_live_in_the_inbox(win):
+    seed(win)
+    win.store.create_task("Call|Bank", "2030-01-01", None)
+    assert [i.title for i in items(win)][:2] == ["Inbox", "Home|Chores"]
+    choose(win, "Inbox")
+    assert win.browser.pane.title_label.text() == "Inbox"
+    assert [r.task.name for r in rows(win)] == ["Call|Bank"]
+    assert win.browser.selected_project_id is None
+    assert not win.browser.more_button.isEnabled()   # no project to act on
+
+
+def test_a_task_can_be_moved_to_the_inbox_and_back(win):
+    seed(win)
+    choose(win, "Home|Chores")
+    menu, move = _move_menu(win, row(win, "Buy|Bread").task)
+    _action(move, "Inbox").trigger()
+    menu.close()
+    spin()
+    assert "Buy|Bread" not in [r.task.name for r in rows(win)]
+    assert details(win)["Inbox"].startswith("0/1")
+
+    choose(win, "Inbox")
+    menu, move = _move_menu(win, row(win, "Buy|Bread").task)
+    assert [a.text() for a in move.actions()] == ["Home|Chores"]
+    _action(move, "Home|Chores").trigger()
+    menu.close()
+    spin()
+    assert "Inbox" not in details(win)
+
+
+def test_the_next_task_stays_loose_after_a_loose_one(win):
+    beta = win.store.create_project("Beta")
+    _file_task(win, "One", beta.id)
+    _file_task(win, "Two", 0)                        # the Inbox choice
+    dialog = CreateTaskDialog(win.store, win, preselect_project_id=beta.id)
+    assert dialog.project_combo.currentText() == "Inbox"
+
+
+def test_loose_tasks_show_in_the_date_view_and_the_counts(win):
+    win.store.create_task("Call|Bank", QDate.currentDate().toPython().isoformat(), None)
+    win.show_mode(Mode.DATE)
+    assert details(win)["Today"].startswith("0/1")
+    assert "1 task" in win.counts_label.text()

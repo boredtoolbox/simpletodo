@@ -32,6 +32,7 @@ from PySide6.QtWidgets import (
 
 from ..models import Task
 from .style import (
+    ACCENT,
     CHECKBOX_SIZE,
     CHEVRON_URL,
     DAY_CELL,
@@ -40,6 +41,7 @@ from .style import (
     SPACE_2,
     SPACE_3,
     SPACE_4,
+    icon_svg,
 )
 
 MENU_GLYPH = "\u22ef"   # midline horizontal ellipsis
@@ -313,6 +315,7 @@ class TaskRow(QFrame):
         task: Task,
         *,
         show_project: bool = False,
+        show_date: bool | None = None,
         today: date | None = None,
         parent: QWidget | None = None,
     ) -> None:
@@ -344,16 +347,24 @@ class TaskRow(QFrame):
             self.name_label.setToolTip("Show the description")
         self.name_label.clicked.connect(self.toggle_description)
 
+        self.pin_mark = QLabel()
+        self.pin_mark.setObjectName("pinMark")
+        self.pin_mark.setPixmap(svg_icon(icon_svg("pin", ACCENT), 14).pixmap(14, 14))
+        self.pin_mark.setToolTip("Pinned")
+        self.pin_mark.setVisible(task.is_pinned)
+
         today = today or date.today()
 
         # The project and the due note are separate labels so that only the
-        # due note turns red when a task is late.
+        # due note turns red when a task is late. The date is left out by
+        # default where the project is shown: there, a bucket already says it.
         self._show_project = show_project
+        self._show_date = not show_project if show_date is None else show_date
         self.project_label = QLabel(task.project_name)
         self.project_label.setObjectName("taskMeta")
         self.project_label.setVisible(show_project)
 
-        self.due_label = QLabel(self._due_text(show_project, today))
+        self.due_label = QLabel(self._due_text(today))
         self.due_label.setObjectName("taskMeta")
         self.due_label.setProperty("overdue", task.is_overdue(today))
         self.due_label.setVisible(bool(self.due_label.text()))
@@ -370,6 +381,7 @@ class TaskRow(QFrame):
         row.setSpacing(SPACE_3)
         row.addWidget(self.check)
         row.addWidget(self.name_label)
+        row.addWidget(self.pin_mark)
         row.addStretch(1)
         row.addWidget(self.project_label)
         row.addWidget(self.due_label)
@@ -456,11 +468,11 @@ class TaskRow(QFrame):
         ]
         return "   ".join(part for part in parts if part)
 
-    def _due_text(self, show_project: bool, today: date) -> str:
+    def _due_text(self, today: date) -> str:
         if self.task.is_overdue(today):
             days = (today - self.task.due).days
             return f"overdue {days}d" if days > 1 else "overdue"
-        if not show_project:
+        if self._show_date:
             return self.task.due.strftime("%d %b")
         return ""
 
@@ -479,7 +491,7 @@ class TaskRow(QFrame):
 
         # A finished task is never overdue, so the due note can change too.
         today = today or date.today()
-        self.due_label.setText(self._due_text(self._show_project, today))
+        self.due_label.setText(self._due_text(today))
         self.due_label.setProperty("overdue", self.task.is_overdue(today))
         self.due_label.setVisible(bool(self.due_label.text()))
 

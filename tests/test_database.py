@@ -335,15 +335,15 @@ def test_an_archived_name_is_still_taken(db):
     assert db.project_exists("home")
 
 
-def test_the_last_task_project_is_remembered(db):
-    assert db.last_task_project_id() is None
+def test_the_newest_task_is_remembered(db):
+    assert db.newest_task() is None
     home = db.add_project("Home")
     work = db.add_project("Work")
     db.add_task("A", iso(), home.id)
-    assert db.last_task_project_id() == home.id
+    assert db.newest_task().project_id == home.id
     db.add_task("B", iso(), work.id)
-    db.add_task("C", iso(), work.id)
-    assert db.last_task_project_id() == work.id
+    db.add_task("C", iso(), None)
+    assert (db.newest_task().name, db.newest_task().project_id) == ("C", None)
 
 
 def test_a_task_moves_between_projects(db):
@@ -355,3 +355,109 @@ def test_a_task_moves_between_projects(db):
     [moved] = db.tasks_for_project(work.id)
     assert (moved.name, moved.description) == ("A", "detail")
 
+
+
+# -- tasks without a project, and pinned tasks --------------------------
+
+
+def test_a_task_can_belong_to_no_project(db):
+    home = db.add_project("Home")
+    db.add_task("Filed", iso(), home.id)
+    loose = db.add_task("Loose", iso(), None)
+    [reread] = db.loose_tasks()
+    assert (reread.id, reread.project_id, reread.project_name) == (loose.id, None, "")
+    assert [t.name for t in db.tasks_for_project(home.id)] == ["Filed"]
+    assert db.counts() == (1, 2, 0)
+    assert "Loose" in [t.name for t in db.tasks_in_bucket(Bucket.TODAY)]
+
+
+def test_a_task_can_leave_its_project_and_come_back(db):
+    home = db.add_project("Home")
+    task = db.add_task("A", iso(), home.id)
+    db.move_task(task.id, None)
+    assert [t.name for t in db.loose_tasks()] == ["A"]
+    db.move_task(task.id, home.id)
+    assert db.loose_tasks() == []
+
+
+def test_pinned_tasks_come_from_everywhere_but_the_archive(db):
+    home = db.add_project("Home")
+    old = db.add_project("Old")
+    for name, project in (("Home pin", home), ("Old pin", old), ("Loose pin", None)):
+        task = db.add_task(name, iso(), project.id if project else None)
+        db.set_task_pinned(task.id, True)
+    db.add_task("Unpinned", iso(), home.id)
+    db.set_project_archived(old.id, True)
+    assert sorted(t.name for t in db.pinned_tasks()) == ["Home pin", "Loose pin"]
+    assert all(t.is_pinned for t in db.pinned_tasks())
+
+
+def test_pinned_tasks_sort_first_but_finished_ones_still_sink(db):
+    home = db.add_project("Home")
+    db.add_task("Soon", iso(0), home.id)
+    later = db.add_task("Later", iso(5), home.id)
+    done = db.add_task("Done", iso(9), home.id)
+    for task in (later, done):
+        db.set_task_pinned(task.id, True)
+    db.set_task_completed(done.id, True)
+    assert [t.name for t in db.tasks_for_project(home.id)] == ["Later", "Soon", "Done"]
+    db.set_task_pinned(later.id, False)
+    assert [t.name for t in db.tasks_for_project(home.id)] == ["Soon", "Later", "Done"]
+
+
+# -- upgrading a database from before those existed --------------------
+
+
+def _version_0_database(path):
+    """A database as the first release wrote it: a project per task, no pins."""
+    conn = sqlite3.connect(path)
+    conn.executescript(
+        """
+        CREATE TABLE projects (
+            id INTEGER PRIMARY KEY AUTOINCREMENT, name TEXT NOT NULL,
+            creation_date TEXT NOT NULL, is_active INTEGER NOT NULL DEFAULT 1);
+        CREATE TABLE tasks (
+            id INTEGER PRIMARY KEY AUTOINCREMENT, name TEXT NOT NULL,
+            description TEXT NOT NULL DEFAULT '', due_date TEXT NOT NULL,
+            project_id INTEGER NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+            is_completed INTEGER NOT NULL DEFAULT 0, creation_date TEXT NOT NULL);
+        INSERT INTO projects VALUES (1, 'Home', '2026-01-01T09:00:00', 1);
+        INSERT INTO tasks VALUES
+            (7, 'Kept', 'detail', '2030-01-01', 1, 1, '2026-01-01T09:00:00');
+        """
+    )
+    conn.commit()
+    conn.close()
+
+
+def test_an_old_database_is_upgraded_and_keeps_its_data(tmp_path):
+    path = tmp_path / "old.sqlite3"
+    _version_0_database(path)
+    with Database(path) as database:
+        [task] = database.tasks_for_project(1)
+        assert (task.id, task.name, task.description, task.is_completed) == (
+            7, "Kept", "detail", True)
+        assert task.is_pinned is False
+        database.add_task("Loose", iso(), None)              # newly allowed
+        database.set_task_pinned(task.id, True)
+        database.delete_project(1)                           # still cascades
+        assert [t.name for t in database.all_tasks()] == ["Loose"]
+        assert database.conn.execute("PRAGMA user_version").fetchone()[0] == 1
+
+
+@pytest.mark.skipif(os.geteuid() == 0, reason="root ignores file permissions")
+def test_an_old_database_that_cannot_be_written_is_left_alone(tmp_path):
+    blocked = tmp_path / "blocked"
+    blocked.mkdir()
+    path = blocked / "old.sqlite3"
+    _version_0_database(path)
+    original = path.read_bytes()
+    blocked.chmod(0o500)
+    try:
+        with pytest.raises(DatabaseError) as caught:
+            Database(path).connect()
+        assert "upgrade" in str(caught.value)
+    finally:
+        blocked.chmod(0o700)
+    assert path.read_bytes() == original
+    assert not list(blocked.glob("*.corrupt-*"))

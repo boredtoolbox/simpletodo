@@ -2,7 +2,8 @@
 
 The window is laid out like Apple Notes: a list on the left -- projects, the
 four date buckets, or the archive, depending on the switch above it -- and on
-the right the tasks of whichever entry is selected.
+the right the tasks of whichever entry is selected. Above the projects sit
+two shelves, Pinned and Inbox, each listed only while it holds a task.
 
 The Browser observes the store and rebuilds both halves whenever it reports a
 change, remembering the selection in each mode. Ticking a box is the
@@ -71,9 +72,19 @@ class Mode(Enum):
     ARCHIVE = "Archive"
 
 
+class Shelf(Enum):
+    """Projects-view entries that are not projects. The value is the title."""
+
+    #: Pinned tasks from everywhere. First in the list, so it is what the
+    #: window opens on whenever something is pinned.
+    PINNED = "Pinned"
+    #: Tasks that belong to no project.
+    INBOX = "Inbox"
+
+
 @dataclass
 class Entry:
-    """One sidebar line: a project (keyed by id) or a date bucket."""
+    """One sidebar line: a project (keyed by id), a Shelf or a date bucket."""
 
     key: object
     title: str
@@ -81,6 +92,8 @@ class Entry:
     total: int
     #: The next task still to do, shown muted after the count.
     preview: str
+    #: Whether it has a ⋯ menu; only projects do.
+    has_menu: bool = False
 
 
 def _discard(widget: QWidget | None) -> None:
@@ -152,7 +165,9 @@ class Sidebar(QWidget):
                 divider.setFixedHeight(1)
                 self._dividers.append(divider)
                 self._layout.insertWidget(self._layout.count() - 1, divider)
-            item = SidebarItem(entry.key, entry.title, with_menu=with_menu)
+            item = SidebarItem(
+                entry.key, entry.title, with_menu=with_menu and entry.has_menu
+            )
             item.chosen.connect(self._on_item_chosen)
             item.menuRequested.connect(
                 lambda position, key=entry.key: self.menuRequested.emit(key, position)
@@ -264,12 +279,16 @@ class TaskPane(QWidget):
         tasks: list[Task],
         *,
         show_project: bool,
+        show_date: bool,
         empty_note: str,
     ) -> list[TaskRow]:
         self._clear_rows()
         self.title_label.setText(title)
         self.subtitle_label.setText(subtitle)
-        rows = [TaskRow(task, show_project=show_project) for task in tasks]
+        rows = [
+            TaskRow(task, show_project=show_project, show_date=show_date)
+            for task in tasks
+        ]
         for row in rows:
             self._rows_layout.addWidget(row)
         if not rows:
@@ -354,7 +373,10 @@ class Browser(QWidget):
 
     #: Shown in the pane when the sidebar has nothing to select.
     EMPTY = {
-        Mode.PROJECTS: "No projects yet.\n\nUse the + button to create one.",
+        Mode.PROJECTS: (
+            "No projects yet.\n\n"
+            "Use the + button to create one, or to add a task on its own."
+        ),
         Mode.ARCHIVE: "Nothing archived.\n\nArchive a project from its ⋯ menu.",
     }
 
@@ -472,24 +494,30 @@ class Browser(QWidget):
         done = sum(task.is_completed for task in tasks)
         if isinstance(key, Bucket):
             title, empty = key.label, "Nothing due."
+        elif isinstance(key, Shelf):
+            title, empty = key.value, "Nothing here."
         else:
             title, empty = self._projects[key].name, "No tasks yet."
         subtitle = f"{done} of {len(tasks)} done" if tasks else ""
         if self.mode is Mode.ARCHIVE:
             subtitle = " · ".join(p for p in ("Archived", subtitle) if p)
 
+        # Pinned gathers tasks from every project, so it names theirs; a
+        # bucket's title is already their date.
         rows = self.pane.show_tasks(
             title, subtitle, tasks,
-            show_project=self.mode is Mode.DATE, empty_note=empty,
+            show_project=self.mode is Mode.DATE or key is Shelf.PINNED,
+            show_date=self.mode is not Mode.DATE,
+            empty_note=empty,
         )
         for row in rows:
             self._wire_row(row)
 
-    def reveal_project(self, project_id: int) -> None:
-        """Switch to the Projects view with *project_id* selected."""
-        self._chosen[Mode.PROJECTS] = project_id
+    def reveal(self, key: int | Shelf) -> None:
+        """Switch to the Projects view with a project or a shelf selected."""
+        self._chosen[Mode.PROJECTS] = key
         if self.mode is Mode.PROJECTS:
-            self.select(project_id)
+            self.select(key)
         else:
             self.set_mode(Mode.PROJECTS)
 
@@ -499,26 +527,43 @@ class Browser(QWidget):
                 self._entry(bucket, bucket.label, self._tasks_for(bucket))
                 for bucket in Bucket
             ]
+        entries = []
+        if self.mode is Mode.PROJECTS:
+            # An empty shelf is clutter; it appears with its first task.
+            for shelf in Shelf:
+                tasks = self._tasks_for(shelf)
+                if tasks:
+                    entries.append(self._entry(shelf, shelf.value, tasks))
         projects = self.store.projects(archived=self.mode is Mode.ARCHIVE)
         self._projects = {project.id: project for project in projects}
-        return [
-            self._entry(project.id, project.name, self._tasks_for(project.id))
+        entries += [
+            self._entry(
+                project.id, project.name, self._tasks_for(project.id),
+                has_menu=True,
+            )
             for project in projects
         ]
+        return entries
 
     @staticmethod
-    def _entry(key: object, title: str, tasks: list[Task]) -> Entry:
+    def _entry(
+        key: object, title: str, tasks: list[Task], *, has_menu: bool = False
+    ) -> Entry:
         done = sum(task.is_completed for task in tasks)
         upcoming = next((task.name for task in tasks if not task.is_completed), None)
         if upcoming is None:
             upcoming = "All done" if tasks else "No tasks"
-        return Entry(key, title, done, len(tasks), upcoming)
+        return Entry(key, title, done, len(tasks), upcoming, has_menu)
 
     def _tasks_for(self, key: object) -> list[Task]:
         if isinstance(key, Bucket):
             return self.store.tasks_in_bucket(
                 key, include_completed=not HIDE_COMPLETED_IN_DATE_VIEW
             )
+        if key is Shelf.PINNED:
+            return self.store.pinned_tasks()
+        if key is Shelf.INBOX:
+            return self.store.loose_tasks()
         return self.store.tasks_for_project(key)
 
     def _on_task_completed(self, task_id: int, done: bool) -> None:
@@ -555,6 +600,9 @@ class Browser(QWidget):
         """Open the task menu. Non-blocking, like every other menu here."""
         menu = rounded_menu(self)
         menu.setAttribute(Qt.WA_DeleteOnClose)
+        menu.addAction("Unpin" if task.is_pinned else "Pin").triggered.connect(
+            lambda: self.store.set_task_pinned(task.id, not task.is_pinned)
+        )
         menu.addAction("Rename…").triggered.connect(
             lambda: self._rename_task(task)
         )
@@ -566,13 +614,15 @@ class Browser(QWidget):
         return menu
 
     def _move_menu(self, task: Task, parent: QMenu) -> QMenu:
-        """Every other live project, as somewhere to send *task*."""
+        """Every other live project, and the Inbox, as places to send *task*."""
         move = rounded_menu(parent)
         move.setTitle("Move to")
-        targets = [p for p in self.store.projects() if p.id != task.project_id]
-        for project in targets:
-            move.addAction(project.name).triggered.connect(
-                lambda _=False, pid=project.id: self.store.move_task(task.id, pid)
+        targets = [(p.id, p.name) for p in self.store.projects()]
+        targets.insert(0, (None, Shelf.INBOX.value))
+        targets = [t for t in targets if t[0] != task.project_id]
+        for project_id, name in targets:
+            move.addAction(name).triggered.connect(
+                lambda _=False, pid=project_id: self.store.move_task(task.id, pid)
             )
         move.setEnabled(bool(targets))
         return move

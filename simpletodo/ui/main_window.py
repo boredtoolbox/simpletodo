@@ -20,9 +20,10 @@ from PySide6.QtWidgets import (
 
 from ..store import TodoStore
 from . import macos
-from .dialogs import CreateProjectDialog, CreateTaskDialog, MessageDialog, confirm
-from .style import SIDEBAR_GUTTER, SPACE_1, SPACE_2, SPACE_3, TOOL_SIZE
-from .views import Browser, Mode
+from .dialogs import CreateProjectDialog, CreateTaskDialog, MessageDialog
+from .style import (SIDEBAR_GUTTER, SPACE_1, SPACE_2, SPACE_3, TOOL_SIZE,
+                    TOP_BAR_INSET)
+from .views import Browser, Mode, Shelf
 from .widgets import ElidedLabel, TopBar, rounded_menu
 
 APP_TITLE = "Simple To Do"
@@ -173,7 +174,9 @@ class MainWindow(QMainWindow):
         new_project = QAction("Create Project", self)
         new_project.triggered.connect(self.create_project)
         new_task = QAction("Create Task", self)
-        new_task.triggered.connect(lambda: self.create_task())
+        new_task.triggered.connect(
+            lambda: self.create_task(self.browser.selected_project_id)
+        )
         menu.addAction(new_project)
         menu.addAction(new_task)
 
@@ -183,38 +186,25 @@ class MainWindow(QMainWindow):
     def create_project(self) -> None:
         dialog = CreateProjectDialog(self.store, self)
         # New work is live work: show it where it landed.
-        dialog.created.connect(lambda project: self._reveal_project(project.id))
+        dialog.created.connect(lambda project: self._reveal(project.id))
         dialog.exec()
 
     def create_task(self, project_id: int | None = None) -> None:
         """Ask for a new task, filed under *project_id* unless changed."""
-        if not self.store.projects():
-            if confirm(
-                self,
-                "No Projects Yet",
-                "A task has to belong to a project, and there are none yet. "
-                "Create a project now?",
-                confirm_text="New Project",
-            ):
-                self.create_project()
-                if self.store.projects():
-                    self.create_task()
-            return
-
         dialog = CreateTaskDialog(self.store, self, preselect_project_id=project_id)
         dialog.created.connect(self._reveal_task)
         dialog.exec()
 
     def _reveal_task(self, task) -> None:
         # In the Date view the task already shows under its bucket; anywhere
-        # else, open its project so it is seen.
+        # else, open its project -- or the Inbox -- so it is seen.
         if self.mode is not Mode.DATE:
-            self._reveal_project(task.project_id)
+            self._reveal(task.project_id or Shelf.INBOX)
 
-    def _reveal_project(self, project_id: int) -> None:
+    def _reveal(self, key: int | Shelf) -> None:
         self._last_live_mode = Mode.PROJECTS
         self.segments[Mode.PROJECTS].setChecked(True)
-        self.browser.reveal_project(project_id)
+        self.browser.reveal(key)
 
     # -- chrome -----------------------------------------------------------
 
@@ -250,8 +240,13 @@ class MainWindow(QMainWindow):
                 self._set_top_bar_height(title_bar)
 
     def _set_top_bar_height(self, height: int) -> None:
-        self.sidebar_bar.setFixedHeight(height)
-        self.browser.top_bar.setFixedHeight(height)
+        # The inset is added above the buttons, so they sit that much below
+        # the traffic lights' line rather than crowding the window's edge.
+        for bar in (self.sidebar_bar, self.browser.top_bar):
+            bar.setFixedHeight(height + TOP_BAR_INSET)
+            margins = bar.layout().contentsMargins()
+            margins.setTop(TOP_BAR_INSET)
+            bar.layout().setContentsMargins(margins)
 
 
 def _display_path(path: Path) -> str:

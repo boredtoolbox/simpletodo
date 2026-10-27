@@ -36,10 +36,11 @@ class Project:
 class Task:
     name: str
     due_date: str                      # ISO 8601 date, YYYY-MM-DD
-    project_id: int
+    project_id: int | None             # None: a loose task, in the Inbox
     id: int | None = None
     description: str = ""
     is_completed: bool = False
+    is_pinned: bool = False
     creation_date: str = field(default_factory=now_iso)
 
     #: Populated when a task is read alongside its project.

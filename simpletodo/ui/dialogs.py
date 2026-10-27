@@ -32,6 +32,12 @@ from ..validation import (
 from .style import FIELD_HEIGHT, SPACE_1, SPACE_2, SPACE_3, SPACE_4, SPACE_6
 from .widgets import DatePicker, MenuComboBox, restyle
 
+#: The Project field's "no project" choice. Its item data is 0, not None:
+#: Qt stores None as an empty variant, which findData() cannot look up.
+#: Project ids start at 1.
+NO_PROJECT = 0
+INBOX_LABEL = "Inbox"
+
 NAME_HINT = "Letters, digits, spaces and |"
 
 
@@ -301,18 +307,23 @@ class CreateTaskDialog(_BaseDialog):
 
     def _load_projects(self, preselect_project_id: int | None) -> None:
         self.project_combo.clear()
-        projects = self.store.projects()
-        for project in projects:
+        # A task need not belong to a project; one that does not goes to
+        # the Inbox. It is also the choice when nothing else applies.
+        self.project_combo.addItem(INBOX_LABEL, NO_PROJECT)
+        for project in self.store.projects():
             self.project_combo.addItem(project.name, project.id)
-        if not projects:
-            self.project_combo.addItem("No projects yet — create one first", None)
-            self.project_combo.setEnabled(False)
-            return
-        # The project used for the last task wins over the one in view: the
-        # person asked to keep adding to the same project without re-picking
-        # it. An archived or deleted one is not in the list, so it is skipped.
-        for candidate in (self.store.last_task_project_id(), preselect_project_id):
-            index = self.project_combo.findData(candidate) if candidate else -1
+        # The last task's project -- or its lack of one -- wins over the
+        # project in view: the person asked to keep adding to the same place
+        # without re-picking it. An archived or deleted one is not in the
+        # list, so it is skipped.
+        newest = self.store.newest_task()
+        candidates = [preselect_project_id]
+        if newest is not None:
+            candidates.insert(0, newest.project_id or NO_PROJECT)
+        for candidate in candidates:
+            if candidate is None:
+                continue
+            index = self.project_combo.findData(candidate)
             if index >= 0:
                 self.project_combo.setCurrentIndex(index)
                 return
@@ -336,12 +347,7 @@ class CreateTaskDialog(_BaseDialog):
         self.description_hint.setProperty("warn", bool(over or link))
         restyle(self.description_hint)
 
-        self.create_button.setEnabled(
-            bool(name.strip())
-            and not over
-            and link is None
-            and self.project_combo.currentData() is not None
-        )
+        self.create_button.setEnabled(bool(name.strip()) and not over and link is None)
 
     # -- commit ---------------------------------------------------------
 
@@ -358,15 +364,10 @@ class CreateTaskDialog(_BaseDialog):
             self._set_error(result.message)
             return
 
-        project_id = self.project_combo.currentData()
-        if project_id is None:
-            self._set_error("Choose a project for this task.")
-            return
+        project_id = self.project_combo.currentData() or None
 
         due: date = self.date_edit.date().toPython()
-        task = self.store.create_task(
-            name, due.isoformat(), int(project_id), description
-        )
+        task = self.store.create_task(name, due.isoformat(), project_id, description)
         if task is None:
             return
         self.created.emit(task)
