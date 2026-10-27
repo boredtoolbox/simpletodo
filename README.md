@@ -4,7 +4,7 @@ A minimalist to-do app for macOS and Ubuntu. It works entirely offline: no
 accounts, no network calls, no telemetry. Your tasks are stored in one SQLite
 file on your own disk.
 
-![Projects view](docs/projects.png)
+![Pinned tasks, the Inbox and projects in the sidebar](docs/pinned.png)
 
 ## Download (macOS, Apple Silicon)
 
@@ -75,6 +75,11 @@ first time you open it, right-click it and choose **Open**.
   delete or archive it. A task's menu also has **Move to**, to send it to a
   different project or to the Inbox. The arrow keys move through the sidebar.
 
+<p>
+  <img src="docs/project.png" width="49%" alt="A project's tasks, a pinned one first">
+  <img src="docs/date.png" width="49%" alt="The Date view's Today list">
+</p>
+
 ## Your data
 
 | Platform | Location |
@@ -93,3 +98,6 @@ version opens it; its folder must be writable for that.
 ```bash
 .venv/bin/python -m pytest
 ```
+
+The screenshots above come from the real window, filled with sample tasks:
+`.venv/bin/python tools/readme_screenshots.py` regenerates them in `docs/`.
