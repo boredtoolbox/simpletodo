@@ -1842,3 +1842,25 @@ def test_a_new_dialog_opens_ready_to_type_its_name(win, open_dialog):
     QTimer.singleShot(100, check)
     getattr(win, open_dialog)()
     assert seen["focus"] is seen["name"]
+
+
+def test_dialogs_are_not_sheets(win, monkeypatch):
+    # On cocoa a Qt.Sheet window refuses to become key (canBecomeKeyWindow
+    # is NO): its pickers took clicks, but no keystroke ever reached the
+    # name or description field.
+    from simpletodo.ui import dialogs
+
+    monkeypatch.setattr(dialogs.QGuiApplication, "platformName", lambda: "cocoa")
+    dialog = CreateTaskDialog(win.store, win)
+    assert dialog.windowType() == Qt.Dialog
+    assert dialog.windowModality() == Qt.WindowModal
+
+
+def test_closing_the_project_picker_twice_is_harmless(win):
+    # The menu deletes itself on close; Qt then asks hidePopup() to close
+    # it again, which once touched the deleted menu and logged an error.
+    dialog = _task_dialog(win)
+    dialog.project_combo.showPopup()
+    dialog.project_combo.menu.close()
+    spin(0)
+    dialog.project_combo.hidePopup()

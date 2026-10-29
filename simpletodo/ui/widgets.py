@@ -581,10 +581,17 @@ class MenuComboBox(QComboBox):
             action.triggered.connect(lambda _=False, i=index: self.setCurrentIndex(i))
             if index == self.currentIndex():
                 current = action
+        # It deletes itself on close; forget it then, or hidePopup() would
+        # touch a deleted menu.
+        menu.destroyed.connect(lambda _=None, gone=menu: self._forget_menu(gone))
         menu.popup(self.mapToGlobal(QPoint(0, self.height() + SPACE_1)))
         if current is not None:
             menu.setActiveAction(current)
         self.menu = menu
+
+    def _forget_menu(self, gone: QMenu) -> None:
+        if self.menu is gone:
+            self.menu = None
 
     def hidePopup(self):  # noqa: N802 - Qt naming
         if self.menu is not None and self.menu.isVisible():

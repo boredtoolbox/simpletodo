@@ -64,8 +64,7 @@ class _BaseDialog(QDialog):
     """Shared chrome, laid out like a Notes sheet.
 
     A bold title at the top left; fields in a grid with their labels to the
-    left; a hairline; Cancel and the commit button at the bottom right. On
-    macOS it opens as a sheet sliding out of the window's title bar.
+    left; a hairline; Cancel and the commit button at the bottom right.
     """
 
     def __init__(
@@ -81,7 +80,8 @@ class _BaseDialog(QDialog):
         self.setModal(True)
         self.setWindowTitle(title)
         if parent is not None and QGuiApplication.platformName() == "cocoa":
-            self.setWindowFlag(Qt.Sheet, True)
+            # Not Qt.Sheet: a sheet's panel refuses to become the key window,
+            # so it takes clicks but never a keystroke.
             self.setWindowModality(Qt.WindowModal)
 
         self._title = QLabel(title)
