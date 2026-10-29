@@ -1824,3 +1824,21 @@ def test_loose_tasks_show_in_the_date_view_and_the_counts(win):
     win.show_mode(Mode.DATE)
     assert details(win)["Today"].startswith("0/1")
     assert "1 task" in win.counts_label.text()
+
+
+@pytest.mark.parametrize("open_dialog", ["create_task", "create_project"])
+def test_a_new_dialog_opens_ready_to_type_its_name(win, open_dialog):
+    # The buttons are built before the fields, so they lead the tab chain;
+    # with Create disabled the sheet once opened with Cancel focused, and
+    # typing went nowhere.
+    seen = {}
+
+    def check():
+        dialog = QApplication.activeModalWidget()
+        seen["focus"] = QApplication.focusWidget()
+        seen["name"] = dialog.name_edit
+        dialog.reject()
+
+    QTimer.singleShot(100, check)
+    getattr(win, open_dialog)()
+    assert seen["focus"] is seen["name"]

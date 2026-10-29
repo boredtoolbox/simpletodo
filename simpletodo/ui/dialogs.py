@@ -111,6 +111,7 @@ class _BaseDialog(QDialog):
         self.fields.setHorizontalSpacing(SPACE_3)
         self.fields.setVerticalSpacing(SPACE_2)
         self.fields.setColumnStretch(1, 1)
+        self._first_field: QWidget | None = None
 
         divider = QFrame()
         divider.setObjectName("dialogDivider")
@@ -136,8 +137,18 @@ class _BaseDialog(QDialog):
             name.setContentsMargins(0, SPACE_1 + 2, 0, 0)
         self.fields.addWidget(name, row, 0)
         self.fields.addWidget(field, row, 1)
+        if self._first_field is None:
+            self._first_field = field
         if hint is not None:
             self.fields.addWidget(hint, row + 1, 1)
+
+    def showEvent(self, event):  # noqa: N802 - Qt naming
+        super().showEvent(event)
+        # The buttons are built first and so lead the tab chain; left to
+        # QDialog, the sheet opens with Cancel focused and typing goes
+        # nowhere. Focus set before showing is overridden, hence here.
+        if self._first_field is not None:
+            self._first_field.setFocus(Qt.OtherFocusReason)
 
     def _set_error(self, text: str) -> None:
         self.message.setText(text)
